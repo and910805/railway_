@@ -6,9 +6,16 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
-# 台鐵頁面 / 查詢結果 URL
-SEARCH_PAGE_URL = "https://www.railway.gov.tw/tra-tip-web/tip/tip001/tip121/query"
-SEARCH_RESULT_URL = "https://www.railway.gov.tw/tra-tip-web/tip/tip001/tip119/search"
+# ====== Base URL 設定 ======
+# 預設用 tip 子網域（實際票務系統）
+TRA_BASE_URL = os.getenv("TRA_BASE_URL", "https://tip.railway.gov.tw").rstrip("/")
+
+SEARCH_PAGE_URL = (
+    TRA_BASE_URL + "/tra-tip-web/tip/tip001/tip121/query"
+)
+SEARCH_RESULT_URL = (
+    TRA_BASE_URL + "/tra-tip-web/tip/tip001/tip119/search"
+)
 
 # 共用 Session（保留 cookie）
 _session = requests.Session()
@@ -28,7 +35,10 @@ def _fetch_tokens(session: requests.Session):
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             },
         )
-        print("[checker] GET search page status =", resp.status_code, flush=True)
+        print(
+            f"[checker] GET search page {SEARCH_PAGE_URL} status = {resp.status_code}",
+            flush=True,
+        )
         resp.raise_for_status()
     except Exception as e:
         print("[checker] 取搜尋頁失敗：", e, flush=True)
@@ -103,6 +113,35 @@ def _parse_seat_count(text: str) -> int | None:
     return None
 
 
+def _pick_result_table(soup: BeautifulSoup):
+    """
+    嘗試選出「查詢結果表格」：
+      1. 優先找同時含有「車種車次」以及「餘票 / 可訂 / 訂位」的 table
+      2. 再退一步只要含有「車種車次」也接受
+    """
+    candidates = soup.find_all("table")
+    if not candidates:
+        return None
+
+    # 先找強匹配
+    for t in candidates:
+        txt = t.get_text(" ", strip=True)
+        if "車種車次" in txt and any(
+            k in txt for k in ("餘票", "可訂", "訂位")
+        ):
+            print("[checker] 使用強匹配結果表格（含車種車次+餘票/可訂/訂位）", flush=True)
+            return t
+
+    # 再找含有「車種車次」的
+    for t in candidates:
+        txt = t.get_text(" ", strip=True)
+        if "車種車次" in txt:
+            print("[checker] 使用弱匹配結果表格（只含車種車次）", flush=True)
+            return t
+
+    return None
+
+
 def _find_target_train_has_seat(
     html: str, train_keyword: str, min_seats: int
 ) -> bool:
@@ -116,16 +155,9 @@ def _find_target_train_has_seat(
 
     match_all = (not train_keyword) or (train_keyword == "*")
 
-    # 找包含「餘票狀態／車種車次」的表格
-    table = None
-    for t in soup.find_all("table"):
-        txt = t.get_text(" ", strip=True)
-        if "餘票狀態" in txt and "車種車次" in txt:
-            table = t
-            break
-
+    table = _pick_result_table(soup)
     if not table:
-        print("[checker] 找不到結果表格（餘票狀態 / 車種車次）", flush=True)
+        print("[checker] 找不到結果表格（車種車次相關資訊）", flush=True)
         return False
 
     rows = table.find_all("tr")
@@ -133,6 +165,8 @@ def _find_target_train_has_seat(
 
     for idx, tr in enumerate(rows):
         row_text = tr.get_text(" ", strip=True)
+        if not row_text:
+            continue
 
         # 有指定關鍵字時才過濾車次
         if (not match_all) and (train_keyword not in row_text):
@@ -142,13 +176,14 @@ def _find_target_train_has_seat(
         if not tds:
             continue
 
-        # 嘗試抓第 7 欄當餘票欄，失敗再 fallback 找有「位」字的欄位
+        # 嘗試抓第 7 欄當餘票欄，失敗再 fallback 找有「位」或「訂」字的欄位
         seat_td = None
         if len(tds) >= 7:
             seat_td = tds[6]
         else:
             for td in tds:
-                if "位" in td.get_text():
+                td_text = td.get_text()
+                if any(k in td_text for k in ("位", "訂位", "可訂")):
                     seat_td = td
                     break
         if not seat_td:
@@ -221,7 +256,10 @@ def check_task_has_ticket(task: dict) -> bool:
                 "Referer": SEARCH_PAGE_URL,
             },
         )
-        print("[checker] POST search status =", resp.status_code, flush=True)
+        print(
+            f"[checker] POST search {SEARCH_RESULT_URL} status = {resp.status_code}",
+            flush=True,
+        )
         resp.raise_for_status()
     except Exception as e:
         print("[checker] 查詢失敗：", e, flush=True)
