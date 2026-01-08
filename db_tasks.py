@@ -9,6 +9,10 @@ _lock = threading.Lock()
 
 
 def _get_conn():
+    db_dir = os.path.dirname(TASKS_DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        print(f"[DB] 建立資料夾: {db_dir}", flush=True)
+        os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(TASKS_DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute(
