@@ -16,7 +16,7 @@ from checker import check_task_has_ticket, check_ticket_available
 app = Flask(__name__)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_TARGET_USER_ID = os.getenv("LINE_TARGET_USER_ID")  # 預設推播對象（可選）
+LINE_TARGET_USER_ID = os.getenv("LINE_TARGET_USER_ID")  # 預設測試用
 TARGET_DESC = os.getenv("TARGET_DESC", "台鐵搶票機器人")
 
 print("=== DEBUG ENV AT STARTUP ===", flush=True)
@@ -34,10 +34,10 @@ def _line_headers():
     }
 
 
-def line_push(message: str, to_user_id: str | None = None):
+def line_push(message, to_user_id=None):
     """
     推播訊息給指定 user_id。
-    如果沒給，就用環境變數的 LINE_TARGET_USER_ID（方便你自己測試用）。
+    如果沒指定，就用 LINE_TARGET_USER_ID（方便你自己測試）。
     """
     print(">>> line_push() called", flush=True)
 
@@ -57,7 +57,7 @@ def line_push(message: str, to_user_id: str | None = None):
         "messages": [{"type": "text", "text": message}],
     }
 
-    print(f">>> SENDING PUSH TO {to_user_id} ...", flush=True)
+    print(">>> SENDING PUSH TO", to_user_id, flush=True)
     try:
         resp = requests.post(url, headers=_line_headers(), json=body, timeout=10)
         print("LINE push status:", resp.status_code, resp.text, flush=True)
@@ -65,7 +65,7 @@ def line_push(message: str, to_user_id: str | None = None):
         print("LINE push 發送失敗：", e, flush=True)
 
 
-def line_reply(reply_token: str, text: str):
+def line_reply(reply_token, text):
     """回覆使用者訊息"""
     if not LINE_CHANNEL_ACCESS_TOKEN:
         print("⚠️ LINE_CHANNEL_ACCESS_TOKEN 未設定，略過 reply", flush=True)
@@ -83,11 +83,11 @@ def line_reply(reply_token: str, text: str):
         print("LINE reply 失敗：", e, flush=True)
 
 
-def get_line_profile(user_id: str) -> dict | None:
-    """拿使用者 profile（主要是 displayName），失敗就回 None"""
+def get_line_profile(user_id):
+    """拿使用者 profile（displayName 用），失敗就回 None"""
     if not LINE_CHANNEL_ACCESS_TOKEN:
         return None
-    url = f"https://api.line.me/v2/bot/profile/{user_id}"
+    url = "https://api.line.me/v2/bot/profile/" + user_id
     try:
         resp = requests.get(url, headers=_line_headers(), timeout=10)
         if resp.status_code == 200:
@@ -108,18 +108,18 @@ def job_check_and_notify():
 
         # 2) 取出所有尚未過期 & is_active=1 的任務
         tasks = get_active_future_tasks(today)
-        print(f"[job] active future tasks = {len(tasks)}", flush=True)
+        print("[job] active future tasks =", len(tasks), flush=True)
 
         for task in tasks:
             try:
                 has_ticket = check_task_has_ticket(task)
             except Exception as e:
-                print(f"[job] task #{task['id']} error:", e, flush=True)
+                print("[job] task #%s error: %s" % (task["id"], e), flush=True)
                 continue
 
             if has_ticket:
                 msg = (
-                    f"🔥 台鐵有票啦！\n"
+                    "🔥 台鐵有票啦！\n"
                     f"{task['description']}\n"
                     f"日期：{task['ride_date']}\n"
                     f"時間：{task['start_time']}~{task['end_time']}\n"
@@ -129,7 +129,7 @@ def job_check_and_notify():
                 line_push(msg, to_user_id=task["line_user_id"])
                 mark_notified(task["id"])
             else:
-                print(f"[job] task #{task['id']} 目前沒有符合票", flush=True)
+                print("[job] task #%s 目前沒有符合票" % task["id"], flush=True)
 
     except Exception as e:
         print("[job] 發生錯誤：", e, flush=True)
@@ -141,7 +141,7 @@ scheduler.add_job(job_check_and_notify, "interval", minutes=interval_minutes)
 scheduler.start()
 
 
-# ========= Routes =========
+# ========= 一般 Routes =========
 @app.get("/")
 def index():
     return "ok", 200
@@ -170,37 +170,16 @@ def test_push():
     return jsonify({"status": "test-push-called"})
 
 
-# webhook-debug：純 debug 用，會把 body 印到 log
-@app.route("/webhook-debug", methods=["GET", "POST"])
-def webhook_debug():
-    try:
-        data = request.get_json(force=True, silent=True)
-        print("=== webhook-debug body ===", flush=True)
-        print(data, flush=True)
-    except Exception as e:
-        print("webhook_debug error:", e, flush=True)
-    return "ok", 200
-
-
-# ========= LINE Bot Webhook =========
-@app.route("/webhook", methods=["POST"])
-def webhook():
+# ========= 共用的 LINE events 處理 =========
+def process_line_events(body):
     """
-    給 LINE Messaging API 用的 webhook。
-    目前支援：
-      - 「新增 任務」指令：
-        格式：
-          新增 2026/01/27 1008-台北 4220-高雄 自強135 2 06:00 12:00
-
-        對應：
-          搭車日   出發站     抵達站     車次關鍵字 最少座位 起始時間 結束時間
+    共用的事件處理邏輯：
+      - 新增 任務
+      - 列出 / list 任務
+      - 其他文字 → 傳回說明
     """
-    body = request.get_json(force=True, silent=True)
-    print("=== /webhook body ===", flush=True)
-    print(body, flush=True)
-
     if not body or "events" not in body:
-        return "ok", 200
+        return
 
     for event in body["events"]:
         event_type = event.get("type")
@@ -208,29 +187,39 @@ def webhook():
         source = event.get("source", {})
         user_id = source.get("userId")
 
-        # 只處理 message -> text
         if event_type == "message" and event.get("message", {}).get("type") == "text":
             text = event["message"]["text"].strip()
 
-            # 指令：新增任務
+            # 1) 新增任務指令
             if text.startswith("新增") or text.lower().startswith("add "):
                 _handle_add_task_command(text, user_id, reply_token)
                 continue
 
-            # 其他訊息回個簡單提示
+            # 2) 列出任務
+            if (
+                text.lower() == "list"
+                or text.startswith("列表")
+                or text.startswith("查詢任務")
+                or text.startswith("任務列表")
+            ):
+                _handle_list_tasks(user_id, reply_token)
+                continue
+
+            # 3) 其他訊息 → 回說明
             help_msg = (
                 "嗨～我是台鐵搶票機器人 🤖\n\n"
-                "建立新任務格式：\n"
-                "新增 2026/01/27 1008-台北 4220-高雄 自強135 2 06:00 12:00\n\n"
-                "說明：\n"
-                "  日期 出發站 抵達站 車次關鍵字 最少座位 起始時間 結束時間\n"
+                "✅ 建立新任務格式：\n"
+                "新增 2026/01/27 1008-台北 4220-高雄 自強135 2 06:00 12:00\n"
+                "  日期 出發站 抵達站 車次關鍵字 最少座位 起始時間 結束時間\n\n"
+                "✅ 查看目前監控任務：\n"
+                "  傳送：list\n"
+                "  或：列表 / 查詢任務 / 任務列表\n"
             )
-            line_reply(reply_token, help_msg)
+            if reply_token:
+                line_reply(reply_token, help_msg)
 
-    return "ok", 200
 
-
-def _handle_add_task_command(text: str, user_id: str | None, reply_token: str | None):
+def _handle_add_task_command(text, user_id, reply_token):
     """
     解析「新增」指令，寫入 SQLite。
     指令範例：
@@ -242,14 +231,12 @@ def _handle_add_task_command(text: str, user_id: str | None, reply_token: str | 
         return
 
     try:
-        # 把「新增」/「add」切掉
         parts = text.split()
         if len(parts) != 8:
             raise ValueError("parts length mismatch")
 
         _, ride_date, start_station, end_station, train_kw, min_seats, start_time, end_time = parts
 
-        # 拿一下 displayName（失敗就算了）
         profile = get_line_profile(user_id)
         display_name = None
         if profile and isinstance(profile, dict):
@@ -294,6 +281,75 @@ def _handle_add_task_command(text: str, user_id: str | None, reply_token: str | 
                 "（中間用空白分開）"
             )
             line_reply(reply_token, help_msg)
+
+
+def _handle_list_tasks(user_id, reply_token):
+    """列出目前這個 user 的監控任務"""
+    if not user_id:
+        if reply_token:
+            line_reply(reply_token, "找不到 userId，無法查詢任務 QQ")
+        return
+
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    tasks = get_active_future_tasks(today)
+
+    # 只顯示自己的任務
+    my_tasks = [t for t in tasks if t["line_user_id"] == user_id]
+
+    if not my_tasks:
+        msg = "目前沒有為你監控中的任務喔～\n可以用「新增 ...」來建立一個。"
+        if reply_token:
+            line_reply(reply_token, msg)
+        return
+
+    lines = ["📋 目前監控的任務："]
+    for t in my_tasks:
+        line = (
+            f"[#{t['id']}] {t['ride_date']} {t['start_time']}~{t['end_time']}\n"
+            f"    {t['start_station']} → {t['end_station']}\n"
+            f"    車次關鍵字：{t['train_keyword']}  "
+            f"餘座門檻：{t['min_seats']} 張\n"
+        )
+        lines.append(line)
+
+    msg = "\n".join(lines)
+    if reply_token:
+        line_reply(reply_token, msg)
+
+
+# ========= Webhook Routes =========
+@app.route("/webhook", methods=["POST", "GET"])
+def webhook():
+    """
+    給 LINE 官方設定的 webhook。
+    GET 的時候只回 ok（有些工具會用 GET 測試）。
+    """
+    if request.method == "GET":
+        return "ok", 200
+
+    body = request.get_json(force=True, silent=True)
+    print("=== /webhook body ===", flush=True)
+    print(body, flush=True)
+
+    process_line_events(body)
+    return "ok", 200
+
+
+@app.route("/webhook-debug", methods=["POST", "GET"])
+def webhook_debug():
+    """
+    你如果 LINE 後台現在是指到 /webhook-debug，
+    也會走同一套處理（順便印 log）。
+    """
+    if request.method == "GET":
+        return "ok", 200
+
+    body = request.get_json(force=True, silent=True)
+    print("=== /webhook-debug body ===", flush=True)
+    print(body, flush=True)
+
+    process_line_events(body)
+    return "ok", 200
 
 
 # ========= main =========
