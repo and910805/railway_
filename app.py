@@ -11,7 +11,7 @@ from db_tasks import (
     get_active_future_tasks,
     mark_notified,
 )
-from checker import check_task_has_ticket  # ✅ 修：不要 import check_ticket_available
+from checker import check_task_has_ticket
 
 app = Flask(__name__)
 
