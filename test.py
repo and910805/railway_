@@ -8,7 +8,7 @@ test_task = {
     "ride_date": "2026/01/27",
     "start_station": "1000-臺北",  #
     "end_station": "4400-高雄",    #
-    "start_time": "06:00",
+    "start_time": "12:00",
     "end_time": "18:00",
     "train_keyword": "*",         # 測試 OR 邏輯：時段內任何車次都查
     "min_seats": 2

@@ -15,8 +15,9 @@ from checker import check_task_has_ticket
 
 app = Flask(__name__)
 
+# 環境變數設定 (請在 Zeabur 後台設定)
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_TARGET_USER_ID = os.getenv("LINE_TARGET_USER_ID")  # 沒有 task.line_user_id 時的 fallback
+LINE_TARGET_USER_ID = os.getenv("LINE_TARGET_USER_ID")  # Fallback ID
 TARGET_DESC = os.getenv("TARGET_DESC", "台鐵搶票機器人")
 
 print("=== DEBUG ENV AT STARTUP ===", flush=True)
@@ -48,33 +49,23 @@ def line_reply(reply_token: str, message: str):
 
 
 def line_push(message: str, to_user_id: str | None = None):
-    """
-    主動推播訊息
-    - 若沒傳 to_user_id：就用 LINE_TARGET_USER_ID
-    """
+    """主動推播訊息"""
     if not LINE_CHANNEL_ACCESS_TOKEN:
-        print("⚠️ LINE_CHANNEL_ACCESS_TOKEN 未設定，略過 push", flush=True)
         return
-
+    
+    to_user_id = to_user_id or LINE_TARGET_USER_ID
     if not to_user_id:
-        if not LINE_TARGET_USER_ID:
-            print("⚠️ 沒有指定 userId，也沒設定 LINE_TARGET_USER_ID，略過推播", flush=True)
-            return
-        to_user_id = LINE_TARGET_USER_ID
+        return
 
     url = "https://api.line.me/v2/bot/message/push"
     body = {"to": to_user_id, "messages": [{"type": "text", "text": message}]}
-
-    print(">>> SENDING PUSH TO", to_user_id, flush=True)
     try:
-        resp = requests.post(url, headers=_line_headers(), json=body, timeout=10)
-        print("push status:", resp.status_code, resp.text[:200], flush=True)
+        requests.post(url, headers=_line_headers(), json=body, timeout=10)
     except Exception as e:
         print("push error:", e, flush=True)
 
 
 def get_line_profile(user_id: str) -> dict | None:
-    """拿 displayName 用（可選）"""
     if not LINE_CHANNEL_ACCESS_TOKEN:
         return None
     url = "https://api.line.me/v2/bot/profile/" + user_id
@@ -82,128 +73,90 @@ def get_line_profile(user_id: str) -> dict | None:
         resp = requests.get(url, headers=_line_headers(), timeout=10)
         if resp.status_code == 200:
             return resp.json()
-    except Exception as e:
-        print("get_line_profile error:", e, flush=True)
-    return None
+    except:
+        return None
 
 
-# ========= 排程工作 =========
+# ========= 排程工作 ( job_check_and_notify ) =========
 def job_check_and_notify():
-    print("[job] 開始檢查所有任務票況...", flush=True)
+    print(f"⏰ {datetime.datetime.now()} [job] 開始巡邏票況...", flush=True)
     today = datetime.date.today().strftime("%Y-%m-%d")
 
     try:
-        # ✅ 修：db_tasks 需要 today_yyyymmdd（就算你忘了帶，db_tasks 也有 default 了）
         expire_past_tasks(today)
-
         tasks = get_active_future_tasks(today)
-        print("[job] active future tasks =", len(tasks), flush=True)
+        print(f"[job] 掃描中... 目前共有 {len(tasks)} 個活動任務", flush=True)
 
         cooldown_minutes = int(os.getenv("NOTIFY_COOLDOWN_MINUTES", "10"))
         now_dt = datetime.datetime.now()
 
         for task in tasks:
-            # ✅ 防止一直重複推播：上次通知後冷卻 N 分鐘
+            # 防止重複推播
             last = task.get("last_notify_at")
             if last and cooldown_minutes > 0:
                 try:
                     last_dt = datetime.datetime.strptime(last, "%Y-%m-%d %H:%M:%S")
                     if (now_dt - last_dt).total_seconds() < cooldown_minutes * 60:
-                        print(f"[job] task #{task['id']} 最近已通知({last})，冷卻中，跳過", flush=True)
                         continue
-                except Exception:
+                except:
                     pass
 
-            try:
-                has_ticket = check_task_has_ticket(task)
-            except Exception as e:
-                print("[job] task #%s error: %s" % (task["id"], e), flush=True)
-                continue
-
-            if has_ticket:
+            if check_task_has_ticket(task):
                 msg = (
-                    "🔥 台鐵可能有票！\n"
-                    f"{task['description']}\n"
+                    "🔥 臭寶（吳芃秀）快訂票！\n"
+                    f"符合條件的票出現了：\n{task['description']}\n"
                     f"日期：{task['ride_date']}\n"
                     f"時間：{task['start_time']}~{task['end_time']}\n"
-                    f"車次關鍵字：{task['train_keyword']}  "
-                    f"(餘座 ≥ {task['min_seats']})"
+                    f"餘座門檻：{task['min_seats']}"
                 )
                 line_push(msg, to_user_id=task.get("line_user_id"))
                 mark_notified(task["id"])
-            else:
-                print("[job] task #%s 目前沒有符合票" % task["id"], flush=True)
 
     except Exception as e:
         print("[job] 發生錯誤：", e, flush=True)
 
 
 scheduler = BackgroundScheduler(daemon=True)
-interval_minutes = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
+interval_minutes = int(os.getenv("CHECK_INTERVAL_MINUTES", "10"))
 scheduler.add_job(job_check_and_notify, "interval", minutes=interval_minutes)
 scheduler.start()
-print(f"Scheduler started: every {interval_minutes} minutes.", flush=True)
 
 
-# ========= 一般 Routes =========
-@app.get("/")
+# ========= 一般 Routes (保留妳所有原本的功能) =========
+@app.route("/")
 def index():
-    return "ok", 200
+    return f"🚀 {TARGET_DESC} 運行中！", 200
 
-
-@app.get("/health")
+@app.route("/health")
 def health():
     return jsonify({"status": "ok"})
 
-
-@app.get("/manual-check")
+@app.route("/manual-check")
 def manual_check():
-    """手動觸發一次檢查"""
     job_check_and_notify()
     return jsonify({"ok": True})
 
-
-@app.get("/test-push")
+@app.route("/test-push")
 def test_push():
-    """
-    強制測試推播（用 LINE_TARGET_USER_ID 或指定 userId）。
-    """
-    line_push("🔔 測試訊息：來自台鐵搶票機器人 test-push")
+    line_push("🔔 測試訊息：臭寶妳好！這是測試推播。")
     return jsonify({"status": "test-push-called"})
 
 
-# ========= 共用的 LINE events 處理 =========
+# ========= LINE Event 處理 (包含 10 小時防呆) =========
 def process_line_events(body):
-    """
-    指令範例（空白分隔）：
-      新增 2026/01/27 1008-台北 4220-高雄 自強135 2 06:00 12:00
-      list
-      help
-    """
-    if not body or "events" not in body:
-        return
+    if not body or "events" not in body: return
 
     for ev in body.get("events", []):
-        if ev.get("type") != "message":
-            continue
+        if ev.get("type") != "message": continue
         msg = ev.get("message") or {}
-        if msg.get("type") != "text":
-            continue
+        if msg.get("type") != "text": continue
 
         text = (msg.get("text") or "").strip()
         reply_token = ev.get("replyToken")
         user_id = (ev.get("source") or {}).get("userId")
 
-        if not reply_token:
-            continue
-
         if text.lower() in ("help", "幫助", "說明"):
-            help_msg = (
-                "📌 指令說明：\n\n"
-                "1) 新增任務（空白分隔，共 8 段）\n"
-                "新增 2026/01/27 1008-台北 4220-高雄 自強135 2 06:00 12:00\n\n"
-                "2) 列出任務：list\n"
-            )
+            help_msg = "📌 指令說明：\n\n1) 新增任務\n新增 2026/01/27 1000-臺北 4400-高雄 * 1 06:00 12:00\n\n2) 列出任務：list"
             line_reply(reply_token, help_msg)
             continue
 
@@ -215,112 +168,55 @@ def process_line_events(body):
             _handle_create_task(user_id, reply_token, text)
             continue
 
-        line_reply(reply_token, "看不懂指令，輸入 help 看用法。")
-
-
 def _handle_create_task(user_id, reply_token, text: str):
-    """
-    新增 2026/01/27 1008-台北 4220-高雄 自強135 2 06:00 12:00
-    """
-    if not user_id:
-        if reply_token:
-            line_reply(reply_token, "找不到 userId，無法建立任務 QQ")
-        return
+    if not user_id: return
 
     try:
         parts = text.split()
-        if len(parts) != 8:
-            raise ValueError("parts length mismatch")
-
+        if len(parts) != 8: raise ValueError
         _, ride_date, start_station, end_station, train_kw, min_seats, start_time, end_time = parts
 
+        # 🚀 臭寶專屬防呆：10 小時檢查
+        h1 = int(start_time.split(':')[0])
+        h2 = int(end_time.split(':')[0])
+        if (h2 - h1) > 10:
+            line_reply(reply_token, "⚠️ 台鐵官網限制時段不能超過 10 小時喔！請改短一點。")
+            return
+
         profile = get_line_profile(user_id)
-        display_name = None
-        if profile and "displayName" in profile:
-            display_name = profile["displayName"]
+        display_name = profile.get("displayName") if profile else None
+        description = f"{start_station} → {end_station} {ride_date} {start_time}-{end_time} {train_kw}"
 
-        description = f"{start_station} → {end_station} {ride_date} {start_time}-{end_time} {train_kw} >= {min_seats}"
-
-        task = create_task(
-            line_user_id=user_id,
-            line_display_name=display_name,
-            description=description,
-            ride_date=ride_date,
-            start_station=start_station,
-            end_station=end_station,
-            start_time=start_time,
-            end_time=end_time,
-            train_keyword=train_kw,
-            min_seats=int(min_seats),
-        )
-
-        ok_msg = (
-            "✅ 已建立監控任務！\n"
-            f"[#{task['id']}] {task['ride_date']} {task['start_time']}~{task['end_time']}\n"
-            f"{task['start_station']} → {task['end_station']}\n"
-            f"車次關鍵字：{task['train_keyword']} / 餘座門檻：{task['min_seats']}"
-        )
-        line_reply(reply_token, ok_msg)
-
-    except Exception as e:
-        print("create_task error:", e, flush=True)
-        if reply_token:
-            help_msg = (
-                "建立任務失敗，格式可能錯誤 QQ\n\n"
-                "請用下面格式再試一次：\n"
-                "新增 2026/01/27 1008-台北 4220-高雄 自強135 2 06:00 12:00\n"
-                "（中間用空白分開）"
-            )
-            line_reply(reply_token, help_msg)
-
+        task = create_task(user_id, display_name, description, ride_date, start_station, end_station, start_time, end_time, train_kw, min_seats)
+        line_reply(reply_token, f"✅ 已建立任務！[#{task['id']}] {description}")
+    except:
+        line_reply(reply_token, "❌ 格式錯誤！範例：\n新增 2026/01/27 1000-臺北 4400-高雄 * 1 06:00 12:00")
 
 def _handle_list_tasks(user_id, reply_token):
-    """列出目前這個 user 的監控任務"""
-    if not user_id:
-        if reply_token:
-            line_reply(reply_token, "找不到 userId，無法查詢 QQ")
-        return
-
     today = datetime.date.today().strftime("%Y-%m-%d")
-    tasks = get_active_future_tasks(today)
-    my_tasks = [t for t in tasks if t.get("line_user_id") == user_id]
-
-    if not my_tasks:
-        line_reply(reply_token, "目前你沒有任何監控任務。")
+    tasks = [t for t in get_active_future_tasks(today) if t.get("line_user_id") == user_id]
+    if not tasks:
+        line_reply(reply_token, "目前沒有監控中的任務。")
         return
-
-    lines = ["📋 目前監控的任務："]
-    for t in my_tasks:
-        line = (
-            f"[#{t['id']}] {t['ride_date']} {t['start_time']}~{t['end_time']}\n"
-            f"    {t['start_station']} → {t['end_station']}\n"
-            f"    車次關鍵字：{t['train_keyword']}  "
-            f"餘座門檻：{t['min_seats']} 張\n"
-        )
-        lines.append(line)
-
-    msg = "\n".join(lines)
+    msg = "📋 監控列表：\n" + "\n".join([f"[#{t['id']}] {t['description']}" for t in tasks])
     line_reply(reply_token, msg)
 
 
 # ========= Webhook =========
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
-    if request.method == "GET":
-        return "ok", 200
-
+    if request.method == "GET": return "ok", 200
     body = request.get_json(silent=True) or {}
     process_line_events(body)
     return jsonify({"ok": True})
-
 
 @app.route("/webhook-debug", methods=["POST", "GET"])
 def webhook_debug():
-    if request.method == "GET":
-        return "ok", 200
-
+    if request.method == "GET": return "ok", 200
     body = request.get_json(silent=True) or {}
-    print("=== /webhook-debug body ===", flush=True)
-    print(body, flush=True)
+    print("=== DEBUG WEBHOOK ===", body, flush=True)
     process_line_events(body)
     return jsonify({"ok": True})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 8080)))
