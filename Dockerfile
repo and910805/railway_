@@ -13,6 +13,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# 修改啟動指令，讓 Port 跟著 Zeabur 的環境變數走
-# Dockerfile 最後一行建議改為：
 CMD ["sh", "-c", "gunicorn app:app -b 0.0.0.0:${PORT:-8080} -w 1 --threads 2"]

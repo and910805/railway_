@@ -21,6 +21,7 @@ def _get_conn():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             line_user_id TEXT NOT NULL,
             line_display_name TEXT,
+
             -- 任務說明，例如：台北→高雄 1/27 早上 自強135 2張以上
             description TEXT,
 
@@ -34,6 +35,7 @@ def _get_conn():
             min_seats INTEGER NOT NULL,     -- 2
 
             is_active INTEGER NOT NULL DEFAULT 1,
+
             created_at TEXT NOT NULL,
             last_notify_at TEXT
         )
@@ -57,16 +59,14 @@ def create_task(
     end_time: str,
     train_keyword: str,
     min_seats: int,
-) -> int:
-    """LINE 指令新增任務時呼叫，回傳 task_id"""
+) -> dict:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _lock:
         cur = _conn.execute(
             """
             INSERT INTO ticket_task (
                 line_user_id, line_display_name, description,
-                ride_date, start_station, end_station,
-                start_time, end_time,
+                ride_date, start_station, end_station, start_time, end_time,
                 train_keyword, min_seats,
                 is_active, created_at
             )
@@ -82,19 +82,25 @@ def create_task(
                 start_time,
                 end_time,
                 train_keyword,
-                min_seats,
+                int(min_seats),
                 now,
             ),
         )
         _conn.commit()
-        return cur.lastrowid
+
+        task_id = cur.lastrowid
+        row = _conn.execute("SELECT * FROM ticket_task WHERE id = ?", (task_id,)).fetchone()
+        return dict(row) if row else {}
 
 
-def expire_past_tasks(today_yyyymmdd: str):
+def expire_past_tasks(today_yyyymmdd: str | None = None):
     """
     把已經「搭車日 < 今天」的任務關掉（is_active=0）
     today_yyyymmdd 例如 '2026-01-08'
     """
+    if not today_yyyymmdd:
+        today_yyyymmdd = datetime.now().strftime("%Y-%m-%d")
+
     with _lock:
         _conn.execute(
             """
@@ -108,10 +114,13 @@ def expire_past_tasks(today_yyyymmdd: str):
         _conn.commit()
 
 
-def get_active_future_tasks(today_yyyymmdd: str) -> list[dict]:
+def get_active_future_tasks(today_yyyymmdd: str | None = None) -> list[dict]:
     """
     取出所有「尚未過期 & 啟用中」的任務
     """
+    if not today_yyyymmdd:
+        today_yyyymmdd = datetime.now().strftime("%Y-%m-%d")
+
     with _lock:
         cur = _conn.execute(
             """
