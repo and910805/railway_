@@ -165,3 +165,14 @@ def mark_notified(task_id: int):
             (now, task_id),
         )
         _conn.commit()
+def delete_task(task_id: int, line_user_id: str) -> bool:
+    """
+    刪除指定 ID 的任務，且必須符合該 user_id
+    """
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM ticket_task WHERE id = ? AND line_user_id = ?",
+            (task_id, line_user_id),
+        )
+        _conn.commit()
+        return cur.rowcount > 0  # 如果有刪除到東西就回傳 True
