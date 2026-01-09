@@ -1,5 +1,6 @@
 flask
-apscheduler
+flask-apscheduler
 requests
 gunicorn
 beautifulsoup4
+nodriver
