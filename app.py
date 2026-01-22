@@ -45,7 +45,10 @@ from db_love import (
     # media
     save_media_record,
     get_media_record,
+    # NEW
+    mark_message_processed,
 )
+
 
 from weather_client import fetch_today_weather_metrics
 
@@ -1018,12 +1021,27 @@ def process_line_events(body):
         msg_type = msg.get("type")
         reply_token = ev.get("replyToken")
         user_id = (ev.get("source") or {}).get("userId") or "unknown"
+        message_id = msg.get("id")  # IMPORTANT: use for dedupe
 
+        # --- DEDUPE: avoid LINE retries causing duplicate side-effects ---
+        if message_id:
+            try:
+                is_new = mark_message_processed(
+                    db_path=LOVE_DB_PATH,
+                    message_id=message_id,
+                    user_id=user_id,
+                    msg_type=msg_type or "",
+                )
+                if not is_new:
+                    print(f"[DEDUPE] skip {msg_type} id={message_id}", flush=True)
+                    continue
+            except Exception as e:
+                # If dedupe fails, keep processing (do not drop events)
+                print("[DEDUPE] mark_message_processed error:", e, flush=True)
+
+        # Now do the slower profile call
         profile = get_line_profile(user_id) or {}
         display_name = profile.get("displayName") or ""
-
-        # ensure subscriber exists
-        upsert_subscriber(db_path=LOVE_DB_PATH, user_id=user_id, display_name=display_name)
 
         if msg_type == "text":
             text = (msg.get("text") or "").strip()
@@ -1036,7 +1054,7 @@ def process_line_events(body):
             continue
 
         if msg_type == "image":
-            message_id = msg.get("id")
+            # (keep your existing logic, but now message_id already exists)
             print(f"[IN] {display_name}({user_id}): <image> id={message_id}", flush=True)
             upsert_activity(user_id, display_name, preview="[image]")
 
@@ -1075,12 +1093,12 @@ def process_line_events(body):
                     line_reply(reply_token, "✅ 我收到照片了，但處理/轉送失敗（可能 PUBLIC_BASE_URL 未設定或下載失敗）。")
             continue
 
-        # other types
         preview = f"[{msg_type}]"
         print(f"[IN] {display_name}({user_id}): {preview}", flush=True)
         upsert_activity(user_id, display_name, preview=preview)
         if reply_token:
             line_reply(reply_token, "✅ 收到～")
+
 
 
 # ====== scheduler: proactive weather push ======
