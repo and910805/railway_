@@ -1,43 +1,34 @@
-# db_love.py
+# db_love.py - SQLite helpers for love bot
 import os
 import sqlite3
-import threading
-from datetime import datetime
+import datetime
 from typing import Optional
 
-LOVE_DB_PATH = os.getenv("LOVE_DB_PATH", "/data/love.db")
-_lock = threading.Lock()
+DEFAULT_DB = os.getenv("LOVE_DB_PATH", "/data/love.db")
 
 
-def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def _tz_now_iso(tz: str = "Asia/Taipei") -> str:
+    # keep as simple ISO; app uses tz-aware timestamps too
+    return datetime.datetime.now().isoformat(timespec="seconds")
 
 
-def _get_conn():
-    db_dir = os.path.dirname(LOVE_DB_PATH)
-    if db_dir and not os.path.exists(db_dir):
-        print(f"[DB] 建立資料夾: {db_dir}", flush=True)
-        os.makedirs(db_dir, exist_ok=True)
-
-    conn = sqlite3.connect(LOVE_DB_PATH, check_same_thread=False)
+def _conn(db_path: str):
+    conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    return conn
 
-    # love lines
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS love_line (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT NOT NULL,
-            tags TEXT,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
 
-    # date ideas
-    conn.execute(
+def seed_defaults(db_path: str = DEFAULT_DB):
+    conn = _conn(db_path)
+    cur = conn.cursor()
+
+    # core tables
+    cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS date_idea (
+        CREATE TABLE IF NOT EXISTS love_lines (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             text TEXT NOT NULL,
             created_at TEXT NOT NULL
@@ -45,354 +36,422 @@ def _get_conn():
         """
     )
 
-    # wishes
-    conn.execute(
+    cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS wish (
+        CREATE TABLE IF NOT EXISTS date_ideas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            line_user_id TEXT NOT NULL,
             text TEXT NOT NULL,
             created_at TEXT NOT NULL
         )
         """
     )
 
-    # moods
-    conn.execute(
+    cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS mood (
+        CREATE TABLE IF NOT EXISTS wishes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            line_user_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
             text TEXT NOT NULL,
             created_at TEXT NOT NULL
         )
         """
     )
 
-    # per-user settings
-    conn.execute(
+    cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS user_setting (
-            line_user_id TEXT NOT NULL,
-            key TEXT NOT NULL,
-            value TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS moods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            user_id TEXT NOT NULL,
+            k TEXT NOT NULL,
+            v TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            PRIMARY KEY (line_user_id, key)
+            PRIMARY KEY(user_id, k)
         )
         """
     )
 
-    # subscribers for push / couple roles
-    conn.execute(
+    # subscriber table
+    cur.execute(
         """
         CREATE TABLE IF NOT EXISTS subscriber (
             line_user_id TEXT PRIMARY KEY,
             display_name TEXT,
-            role TEXT,              -- 'girlfriend' or 'boyfriend' (or null)
+            role TEXT,                  -- 'girlfriend' or 'boyfriend'
             is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
         """
     )
 
-    # message logs (for "did she talk to bot?" status)
-    conn.execute(
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_subscriber_role_active ON subscriber(role, is_active);")
+
+    # photo tasks
+    cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS message_log (
+        CREATE TABLE IF NOT EXISTS photo_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            line_user_id TEXT NOT NULL,
-            role TEXT,
-            msg_type TEXT NOT NULL,     -- 'text','image','video','sticker', ...
-            text TEXT,
+            assign_role TEXT NOT NULL,       -- girlfriend / boyfriend
+            text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',  -- open / done / cancelled
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            done_at TEXT
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_photo_tasks_status ON photo_tasks(status, assign_role);")
+
+    # media
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS media (
+            message_id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            content_type TEXT,
+            from_user_id TEXT,
             created_at TEXT NOT NULL
         )
         """
     )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_message_log_user_time ON message_log(line_user_id, created_at)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_message_log_role_time ON message_log(role, created_at)")
 
-    return conn
+    conn.commit()
 
+    # seed default love lines / date ideas if empty
+    n = cur.execute("SELECT COUNT(*) AS c FROM love_lines").fetchone()["c"]
+    if n == 0:
+        defaults = [
+            "你不在我旁邊的時候，我就把想你當作日常。",
+            "你一笑，我今天的壓力就降到 0。",
+            "我喜歡你不是一時興起，是每天都更確定。",
+            "你是我最想好好珍惜的人。",
+        ]
+        for t in defaults:
+            cur.execute("INSERT INTO love_lines(text, created_at) VALUES(?, ?)", (t, _tz_now_iso()))
+        conn.commit()
 
-_conn = _get_conn()
+    n2 = cur.execute("SELECT COUNT(*) AS c FROM date_ideas").fetchone()["c"]
+    if n2 == 0:
+        ideas = [
+            "散步 + 買飲料 + 坐路邊聊天",
+            "去逛超市各買一個小東西交換",
+            "找一間咖啡店各寫一封小紙條給對方",
+            "去河堤吹風看夕陽",
+        ]
+        for t in ideas:
+            cur.execute("INSERT INTO date_ideas(text, created_at) VALUES(?, ?)", (t, _tz_now_iso()))
+        conn.commit()
 
-
-def seed_defaults():
-    with _lock:
-        c1 = _conn.execute("SELECT COUNT(1) AS n FROM love_line").fetchone()["n"]
-        c2 = _conn.execute("SELECT COUNT(1) AS n FROM date_idea").fetchone()["n"]
-
-        if c1 == 0:
-            defaults = [
-                "今天也要記得喝水，因為我很在乎你。",
-                "你不用很厲害才值得被愛，你本來就值得。",
-                "我喜歡你不是因為你完美，是因為你是你。",
-                "如果你累了，就靠著我一下，什麼都不用說。",
-                "你的情緒我都接得住，慢慢來沒關係。",
-                "我想把今天的好心情都分你一半。",
-                "你一出現，我的世界就變得更溫柔。",
-                "我不是要你堅強，我是想陪你一起面對。",
-                "你做得很好了，真的。",
-                "你笑的時候，我會不自覺跟著安心。",
-                "你不用一直撐著，我在。",
-                "我想你了，是真的那種想。",
-                "你是我今天最想見到的人。",
-                "你的存在本身就是一件很美好的事。",
-                "我願意把耐心都留給你。",
-                "就算今天很糟，也還有我在你這邊。",
-                "你不用逞強，我喜歡你最真實的樣子。",
-                "我們慢慢走，但一定一起走。",
-                "你辛苦了，現在可以休息一下。",
-                "我喜歡你，今天比昨天多一點點。",
-            ]
-            _conn.executemany(
-                "INSERT INTO love_line(text, tags, created_at) VALUES(?, ?, ?)",
-                [(t, None, _now()) for t in defaults],
-            )
-
-        if c2 == 0:
-            ideas = [
-                "下班後去散步 30 分鐘，走到一間沒去過的小店",
-                "一起去拍一組「今天的天空」：各自拍 3 張互相分享",
-                "吃完晚餐去便利商店各挑 1 個對方會喜歡的東西",
-                "找一間咖啡廳，各自寫 5 件最近開心的小事交換",
-                "在家做簡單料理：煎蛋/炒青菜/泡麵升級版也行",
-                "看一部你們都沒看過的電影，結束後互相打分數",
-                "一起整理相簿：挑 10 張最喜歡的合照做成小合集",
-                "選一首歌，彼此說「為什麼想到對方」",
-                "去書店各挑一本書，交換讀 10 頁講心得",
-                "在家玩桌遊/撲克牌，輸的人完成一個小任務",
-                "晚餐後去超市買水果，回家切盤當甜點",
-                "一起規劃下一次小旅行：景點/交通/吃什麼",
-            ]
-            _conn.executemany(
-                "INSERT INTO date_idea(text, created_at) VALUES(?, ?)",
-                [(t, _now()) for t in ideas],
-            )
-
-        _conn.commit()
+    conn.close()
 
 
-# ====== subscriber / role ======
-def upsert_subscriber(user_id: str, display_name: str = "", now_str: Optional[str] = None):
-    ts = now_str or _now()
-    with _lock:
-        _conn.execute(
-            """
-            INSERT INTO subscriber(line_user_id, display_name, role, is_active, created_at, updated_at)
-            VALUES(?, ?, NULL, 1, ?, ?)
-            ON CONFLICT(line_user_id) DO UPDATE SET
-                display_name=excluded.display_name,
-                updated_at=excluded.updated_at
-            """,
-            (user_id, display_name, ts, ts),
-        )
-        _conn.commit()
+# ===== love lines =====
+def random_love_line(db_path: str = DEFAULT_DB) -> Optional[dict]:
+    conn = _conn(db_path)
+    row = conn.execute("SELECT id, text FROM love_lines ORDER BY RANDOM() LIMIT 1").fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
-def set_role(user_id: str, role: str, now_str: Optional[str] = None):
-    ts = now_str or _now()
-    with _lock:
-        _conn.execute(
-            "UPDATE subscriber SET role=?, updated_at=? WHERE line_user_id=?",
-            (role, ts, user_id),
-        )
-        _conn.commit()
+def add_love_line(db_path: str, text: str) -> int:
+    conn = _conn(db_path)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO love_lines(text, created_at) VALUES(?, ?)", (text, _tz_now_iso()))
+    conn.commit()
+    lid = cur.lastrowid
+    conn.close()
+    return int(lid)
 
 
-def set_active(user_id: str, active: bool, now_str: Optional[str] = None):
-    ts = now_str or _now()
-    with _lock:
-        _conn.execute(
-            "UPDATE subscriber SET is_active=?, updated_at=? WHERE line_user_id=?",
-            (1 if active else 0, ts, user_id),
-        )
-        _conn.commit()
+def delete_love_line(db_path: str, love_id: int) -> bool:
+    conn = _conn(db_path)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM love_lines WHERE id=?", (love_id,))
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
 
 
-def get_subscriber_by_role(role: str) -> Optional[dict]:
-    with _lock:
-        row = _conn.execute(
-            """
-            SELECT line_user_id, display_name, role, is_active, created_at, updated_at
-            FROM subscriber
-            WHERE role=?
-            ORDER BY updated_at DESC
-            LIMIT 1
-            """,
-            (role,),
-        ).fetchone()
-        return dict(row) if row else None
+def list_love_lines(db_path: str, limit: int = 20) -> list[dict]:
+    conn = _conn(db_path)
+    rows = conn.execute("SELECT id, text FROM love_lines ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
-def get_role(user_id: str) -> Optional[str]:
-    with _lock:
-        row = _conn.execute(
-            "SELECT role FROM subscriber WHERE line_user_id=?",
-            (user_id,),
-        ).fetchone()
-        return row["role"] if row else None
+# ===== date ideas =====
+def random_date_idea(db_path: str = DEFAULT_DB) -> Optional[dict]:
+    conn = _conn(db_path)
+    row = conn.execute("SELECT id, text FROM date_ideas ORDER BY RANDOM() LIMIT 1").fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
-def get_couple_user_ids() -> list[str]:
-    with _lock:
-        rows = _conn.execute(
-            """
-            SELECT line_user_id FROM subscriber
-            WHERE is_active=1 AND role IN ('girlfriend','boyfriend')
-            ORDER BY role DESC
-            """
-        ).fetchall()
-        return [r["line_user_id"] for r in rows]
+def add_date_idea(db_path: str, text: str) -> int:
+    conn = _conn(db_path)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO date_ideas(text, created_at) VALUES(?, ?)", (text, _tz_now_iso()))
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return int(rid)
 
 
-def log_message(user_id: str, msg_type: str, text: Optional[str], created_at: str):
-    role = get_role(user_id)
-    with _lock:
-        _conn.execute(
-            """
-            INSERT INTO message_log(line_user_id, role, msg_type, text, created_at)
-            VALUES(?, ?, ?, ?, ?)
-            """,
-            (user_id, role, msg_type, text, created_at),
-        )
-        _conn.commit()
+# ===== wishes / moods =====
+def add_wish(db_path: str, user_id: str, text: str) -> int:
+    conn = _conn(db_path)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO wishes(user_id, text, created_at) VALUES(?, ?, ?)", (user_id, text, _tz_now_iso()))
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return int(rid)
 
 
-def count_messages_on_date(user_id: str, yyyy_mm_dd: str) -> int:
-    """計算某使用者在指定日期（YYYY-MM-DD）跟 bot 的互動筆數（含文字/圖片等）"""
-    with _lock:
-        row = _conn.execute(
-            """
-            SELECT COUNT(1) AS n
-            FROM message_log
-            WHERE line_user_id=? AND created_at LIKE ?
-            """,
-            (user_id, f"{yyyy_mm_dd}%"),
-        ).fetchone()
-        return int(row["n"] if row else 0)
+def list_wishes(db_path: str, user_id: str, limit: int = 10) -> list[dict]:
+    conn = _conn(db_path)
+    rows = conn.execute(
+        "SELECT id, text, created_at FROM wishes WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
-# ====== love lines ======
-def add_love_line(text: str, tags: Optional[str] = None) -> int:
-    with _lock:
-        cur = _conn.execute(
-            "INSERT INTO love_line(text, tags, created_at) VALUES(?, ?, ?)",
-            (text.strip(), tags, _now()),
-        )
-        _conn.commit()
-        return int(cur.lastrowid)
+def add_mood(db_path: str, user_id: str, text: str) -> int:
+    conn = _conn(db_path)
+    cur = conn.cursor()
+    cur.execute("INSERT INTO moods(user_id, text, created_at) VALUES(?, ?, ?)", (user_id, text, _tz_now_iso()))
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return int(rid)
 
 
-def delete_love_line(line_id: int) -> bool:
-    with _lock:
-        cur = _conn.execute("DELETE FROM love_line WHERE id = ?", (int(line_id),))
-        _conn.commit()
-        return cur.rowcount > 0
+def list_moods(db_path: str, user_id: str, limit: int = 10) -> list[dict]:
+    conn = _conn(db_path)
+    rows = conn.execute(
+        "SELECT id, text, created_at FROM moods WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
-def list_love_lines(limit: int = 20) -> list[dict]:
-    with _lock:
-        rows = _conn.execute(
-            "SELECT id, text, tags, created_at FROM love_line ORDER BY id DESC LIMIT ?",
-            (int(limit),),
-        ).fetchall()
-        return [dict(r) for r in rows]
+# ===== settings =====
+def set_setting(db_path: str, user_id: str, key: str, value: str):
+    conn = _conn(db_path)
+    conn.execute(
+        """
+        INSERT INTO settings(user_id, k, v, updated_at)
+        VALUES(?, ?, ?, ?)
+        ON CONFLICT(user_id, k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at
+        """,
+        (user_id, key, value, _tz_now_iso()),
+    )
+    conn.commit()
+    conn.close()
 
 
-def random_love_line(tag: Optional[str] = None) -> Optional[dict]:
-    with _lock:
-        if tag:
-            row = _conn.execute(
-                "SELECT id, text, tags, created_at FROM love_line WHERE tags LIKE ? ORDER BY RANDOM() LIMIT 1",
-                (f"%{tag}%",),
-            ).fetchone()
-        else:
-            row = _conn.execute(
-                "SELECT id, text, tags, created_at FROM love_line ORDER BY RANDOM() LIMIT 1"
-            ).fetchone()
-        return dict(row) if row else None
+def get_setting(db_path: str, user_id: str, key: str) -> Optional[str]:
+    conn = _conn(db_path)
+    row = conn.execute("SELECT v FROM settings WHERE user_id=? AND k=?", (user_id, key)).fetchone()
+    conn.close()
+    return row["v"] if row else None
 
 
-# ====== date ideas ======
-def add_date_idea(text: str) -> int:
-    with _lock:
-        cur = _conn.execute(
-            "INSERT INTO date_idea(text, created_at) VALUES(?, ?)",
-            (text.strip(), _now()),
-        )
-        _conn.commit()
-        return int(cur.lastrowid)
+# ===== subscriber / roles =====
+def upsert_subscriber(db_path: str, user_id: str, display_name: str):
+    conn = _conn(db_path)
+    conn.execute(
+        """
+        INSERT INTO subscriber(line_user_id, display_name, updated_at)
+        VALUES(?, ?, ?)
+        ON CONFLICT(line_user_id) DO UPDATE SET
+            display_name=excluded.display_name,
+            updated_at=excluded.updated_at
+        """,
+        (user_id, display_name, _tz_now_iso()),
+    )
+    conn.commit()
+    conn.close()
 
 
-def random_date_idea() -> Optional[dict]:
-    with _lock:
-        row = _conn.execute(
-            "SELECT id, text, created_at FROM date_idea ORDER BY RANDOM() LIMIT 1"
-        ).fetchone()
-        return dict(row) if row else None
+def set_role(db_path: str, user_id: str, role: str):
+    conn = _conn(db_path)
+    conn.execute(
+        """
+        UPDATE subscriber SET role=?, updated_at=? WHERE line_user_id=?
+        """,
+        (role, _tz_now_iso(), user_id),
+    )
+    conn.commit()
+    conn.close()
 
 
-# ====== wishes ======
-def add_wish(line_user_id: str, text: str) -> int:
-    with _lock:
-        cur = _conn.execute(
-            "INSERT INTO wish(line_user_id, text, created_at) VALUES(?, ?, ?)",
-            (line_user_id, text.strip(), _now()),
-        )
-        _conn.commit()
-        return int(cur.lastrowid)
+def set_active(db_path: str, user_id: str, is_active: bool):
+    conn = _conn(db_path)
+    conn.execute(
+        """
+        UPDATE subscriber SET is_active=?, updated_at=? WHERE line_user_id=?
+        """,
+        (1 if is_active else 0, _tz_now_iso(), user_id),
+    )
+    conn.commit()
+    conn.close()
 
 
-def list_wishes(line_user_id: str, limit: int = 10) -> list[dict]:
-    with _lock:
-        rows = _conn.execute(
-            "SELECT id, text, created_at FROM wish WHERE line_user_id=? ORDER BY id DESC LIMIT ?",
-            (line_user_id, int(limit)),
-        ).fetchall()
-        return [dict(r) for r in rows]
+def get_role_map_active(db_path: str) -> dict:
+    conn = _conn(db_path)
+    rows = conn.execute(
+        """
+        SELECT line_user_id, role
+        FROM subscriber
+        WHERE is_active=1 AND role IN ('girlfriend','boyfriend')
+        """
+    ).fetchall()
+    conn.close()
+    m = {}
+    for r in rows:
+        m[r["role"]] = r["line_user_id"]
+    return m
 
 
-# ====== moods ======
-def add_mood(line_user_id: str, text: str) -> int:
-    with _lock:
-        cur = _conn.execute(
-            "INSERT INTO mood(line_user_id, text, created_at) VALUES(?, ?, ?)",
-            (line_user_id, text.strip(), _now()),
-        )
-        _conn.commit()
-        return int(cur.lastrowid)
+def get_couple_user_ids(db_path: str) -> list[str]:
+    m = get_role_map_active(db_path=db_path)
+    ids = []
+    if m.get("girlfriend"):
+        ids.append(m["girlfriend"])
+    if m.get("boyfriend"):
+        ids.append(m["boyfriend"])
+    return ids
 
 
-def list_moods(line_user_id: str, limit: int = 10) -> list[dict]:
-    with _lock:
-        rows = _conn.execute(
-            "SELECT id, text, created_at FROM mood WHERE line_user_id=? ORDER BY id DESC LIMIT ?",
-            (line_user_id, int(limit)),
-        ).fetchall()
-        return [dict(r) for r in rows]
+def get_display_name(db_path: str, user_id: str) -> str:
+    conn = _conn(db_path)
+    row = conn.execute("SELECT display_name FROM subscriber WHERE line_user_id=?", (user_id,)).fetchone()
+    conn.close()
+    return (row["display_name"] or "") if row else ""
 
 
-# ====== settings ======
-def set_setting(line_user_id: str, key: str, value: str):
-    with _lock:
-        _conn.execute(
-            """
-            INSERT INTO user_setting(line_user_id, key, value, updated_at)
-            VALUES(?, ?, ?, ?)
-            ON CONFLICT(line_user_id, key)
-            DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-            """,
-            (line_user_id, key, value, _now()),
-        )
-        _conn.commit()
+def get_user_role(db_path: str, user_id: str) -> Optional[str]:
+    conn = _conn(db_path)
+    row = conn.execute("SELECT role FROM subscriber WHERE line_user_id=?", (user_id,)).fetchone()
+    conn.close()
+    return row["role"] if row else None
 
 
-def get_setting(line_user_id: str, key: str) -> Optional[str]:
-    with _lock:
-        row = _conn.execute(
-            "SELECT value FROM user_setting WHERE line_user_id=? AND key=?",
-            (line_user_id, key),
-        ).fetchone()
-        return row["value"] if row else None
+# ===== photo tasks =====
+def create_photo_task(db_path: str, assign_role: str, text: str, created_by: str, expires_at: str) -> int:
+    conn = _conn(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO photo_tasks(assign_role, text, status, created_by, created_at, expires_at)
+        VALUES(?, ?, 'open', ?, ?, ?)
+        """,
+        (assign_role, text, created_by, _tz_now_iso(), expires_at),
+    )
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return int(rid)
+
+
+def list_open_photo_tasks(db_path: str, limit: int = 10) -> list[dict]:
+    conn = _conn(db_path)
+    rows = conn.execute(
+        """
+        SELECT id, assign_role, text, expires_at
+        FROM photo_tasks
+        WHERE status='open'
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def claim_latest_open_task_for_role(db_path: str, role: str, expire_minutes: int = 180) -> Optional[dict]:
+    """
+    Find latest open task for role where expires_at >= now, mark it done, return task.
+    """
+    now = datetime.datetime.now()
+    conn = _conn(db_path)
+    cur = conn.cursor()
+
+    # pick latest open task for role
+    row = cur.execute(
+        """
+        SELECT id, text, expires_at
+        FROM photo_tasks
+        WHERE status='open' AND assign_role=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (role,),
+    ).fetchone()
+
+    if not row:
+        conn.close()
+        return None
+
+    # check expiry
+    try:
+        exp = datetime.datetime.fromisoformat(row["expires_at"])
+    except Exception:
+        exp = None
+
+    if exp and exp < now:
+        conn.close()
+        return None
+
+    # mark done
+    cur.execute(
+        "UPDATE photo_tasks SET status='done', done_at=? WHERE id=?",
+        (_tz_now_iso(), row["id"]),
+    )
+    conn.commit()
+    conn.close()
+    return {"id": row["id"], "text": row["text"], "expires_at": row["expires_at"]}
+
+
+# ===== media =====
+def save_media_record(db_path: str, message_id: str, filename: str, content_type: Optional[str], from_user_id: str, created_at: str):
+    conn = _conn(db_path)
+    conn.execute(
+        """
+        INSERT INTO media(message_id, filename, content_type, from_user_id, created_at)
+        VALUES(?, ?, ?, ?, ?)
+        ON CONFLICT(message_id) DO UPDATE SET
+            filename=excluded.filename,
+            content_type=excluded.content_type,
+            from_user_id=excluded.from_user_id
+        """,
+        (message_id, filename, content_type, from_user_id, created_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_media_record(db_path: str, message_id: str) -> Optional[dict]:
+    conn = _conn(db_path)
+    row = conn.execute(
+        "SELECT message_id, filename, content_type, from_user_id, created_at FROM media WHERE message_id=?",
+        (message_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
