@@ -96,6 +96,22 @@ def _get_conn():
         """
     )
 
+    # message logs (for "did she talk to bot?" status)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            line_user_id TEXT NOT NULL,
+            role TEXT,
+            msg_type TEXT NOT NULL,     -- 'text','image','video','sticker', ...
+            text TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_message_log_user_time ON message_log(line_user_id, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_message_log_role_time ON message_log(role, created_at)")
+
     return conn
 
 
@@ -103,7 +119,6 @@ _conn = _get_conn()
 
 
 def seed_defaults():
-    """資料庫空的時候，塞一些預設情話/約會靈感"""
     with _lock:
         c1 = _conn.execute("SELECT COUNT(1) AS n FROM love_line").fetchone()["n"]
         c2 = _conn.execute("SELECT COUNT(1) AS n FROM date_idea").fetchone()["n"]
@@ -160,7 +175,8 @@ def seed_defaults():
 
 
 # ====== subscriber / role ======
-def upsert_subscriber(user_id: str, display_name: str = ""):
+def upsert_subscriber(user_id: str, display_name: str = "", now_str: Optional[str] = None):
+    ts = now_str or _now()
     with _lock:
         _conn.execute(
             """
@@ -170,41 +186,56 @@ def upsert_subscriber(user_id: str, display_name: str = ""):
                 display_name=excluded.display_name,
                 updated_at=excluded.updated_at
             """,
-            (user_id, display_name, _now(), _now()),
+            (user_id, display_name, ts, ts),
         )
         _conn.commit()
 
 
-def set_role(user_id: str, role: str):
+def set_role(user_id: str, role: str, now_str: Optional[str] = None):
+    ts = now_str or _now()
     with _lock:
         _conn.execute(
-            """
-            UPDATE subscriber
-            SET role=?, updated_at=?
-            WHERE line_user_id=?
-            """,
-            (role, _now(), user_id),
+            "UPDATE subscriber SET role=?, updated_at=? WHERE line_user_id=?",
+            (role, ts, user_id),
         )
         _conn.commit()
 
 
-def set_active(user_id: str, active: bool):
+def set_active(user_id: str, active: bool, now_str: Optional[str] = None):
+    ts = now_str or _now()
     with _lock:
         _conn.execute(
-            """
-            UPDATE subscriber
-            SET is_active=?, updated_at=?
-            WHERE line_user_id=?
-            """,
-            (1 if active else 0, _now(), user_id),
+            "UPDATE subscriber SET is_active=?, updated_at=? WHERE line_user_id=?",
+            (1 if active else 0, ts, user_id),
         )
         _conn.commit()
+
+
+def get_subscriber_by_role(role: str) -> Optional[dict]:
+    with _lock:
+        row = _conn.execute(
+            """
+            SELECT line_user_id, display_name, role, is_active, created_at, updated_at
+            FROM subscriber
+            WHERE role=?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (role,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_role(user_id: str) -> Optional[str]:
+    with _lock:
+        row = _conn.execute(
+            "SELECT role FROM subscriber WHERE line_user_id=?",
+            (user_id,),
+        ).fetchone()
+        return row["role"] if row else None
 
 
 def get_couple_user_ids() -> list[str]:
-    """
-    回傳目前被標記成 girlfriend/boyfriend 且 is_active=1 的 user_ids
-    """
     with _lock:
         rows = _conn.execute(
             """
@@ -214,6 +245,33 @@ def get_couple_user_ids() -> list[str]:
             """
         ).fetchall()
         return [r["line_user_id"] for r in rows]
+
+
+def log_message(user_id: str, msg_type: str, text: Optional[str], created_at: str):
+    role = get_role(user_id)
+    with _lock:
+        _conn.execute(
+            """
+            INSERT INTO message_log(line_user_id, role, msg_type, text, created_at)
+            VALUES(?, ?, ?, ?, ?)
+            """,
+            (user_id, role, msg_type, text, created_at),
+        )
+        _conn.commit()
+
+
+def count_messages_on_date(user_id: str, yyyy_mm_dd: str) -> int:
+    """計算某使用者在指定日期（YYYY-MM-DD）跟 bot 的互動筆數（含文字/圖片等）"""
+    with _lock:
+        row = _conn.execute(
+            """
+            SELECT COUNT(1) AS n
+            FROM message_log
+            WHERE line_user_id=? AND created_at LIKE ?
+            """,
+            (user_id, f"{yyyy_mm_dd}%"),
+        ).fetchone()
+        return int(row["n"] if row else 0)
 
 
 # ====== love lines ======
