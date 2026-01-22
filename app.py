@@ -3,7 +3,6 @@ import os
 import datetime
 import requests
 from flask import Flask, jsonify, request
-
 from zoneinfo import ZoneInfo
 
 from db_love import (
@@ -31,7 +30,7 @@ BOT_NAME = os.getenv("BOT_NAME", "啊晡對話機器人")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Taipei")
 GIRLFRIEND_NICKNAME = os.getenv("GIRLFRIEND_NICKNAME", "啊晡")
 
-# 管理員（允許 /新增情話 /刪除情話 /列表情話 /新增約會）
+# 管理員（允許：新增情話 / 刪除情話 / 列表情話 / 新增約會）
 # 例如：ADMIN_LINE_USER_IDS=Uxxxx,Uyyyy
 ADMIN_LINE_USER_IDS = {
     x.strip() for x in os.getenv("ADMIN_LINE_USER_IDS", "").split(",") if x.strip()
@@ -69,6 +68,8 @@ def line_reply(reply_token: str, message: str):
     try:
         resp = requests.post(url, headers=_line_headers(), json=body, timeout=10)
         print("Reply status:", resp.status_code, flush=True)
+        if resp.status_code != 200:
+            print("Reply body:", resp.text[:500], flush=True)
     except Exception as e:
         print("Reply error:", e, flush=True)
 
@@ -84,11 +85,14 @@ def line_push(message: str, to_user_id: str | None = None):
     try:
         resp = requests.post(url, headers=_line_headers(), json=body, timeout=10)
         print("Push status:", resp.status_code, flush=True)
+        if resp.status_code != 200:
+            print("Push body:", resp.text[:500], flush=True)
     except Exception as e:
         print("Push error:", e, flush=True)
 
 
 def get_line_profile(user_id: str) -> dict | None:
+    """抓顯示名稱用（可有可無）。如果你覺得太慢可直接不用呼叫。"""
     if not LINE_CHANNEL_ACCESS_TOKEN:
         return None
     url = f"https://api.line.me/v2/bot/profile/{user_id}"
@@ -120,7 +124,6 @@ def infer_activity_message(nickname: str) -> str:
     wd = now.weekday()  # 0=Mon ... 6=Sun
     is_weekend = wd >= 5
 
-    # 時段推估（你可以自己改成更貼近她的作息）
     if 0 <= h < 6:
         base = f"{nickname} 應該在睡覺或半夢半醒。"
         tip = "你可以傳：「睡醒跟我說，我在。」"
@@ -157,41 +160,69 @@ def help_text() -> str:
         f"【{BOT_NAME} 指令】\n"
         "\n"
         "基本：\n"
-        "  /情話                - 隨機一句情話\n"
-        "  /啊晡在幹嘛           - 依照現在時間推測她在做什麼\n"
-        "  /早安                - 早安 + 情話\n"
-        "  /晚安                - 晚安 + 情話\n"
-        "  /約會                - 隨機約會靈感\n"
+        "  情話                - 隨機一句情話\n"
+        "  啊晡在幹嘛           - 依照現在時間推測她在做什麼\n"
+        "  早安                - 早安 + 情話\n"
+        "  晚安                - 晚安 + 情話\n"
+        "  約會                - 隨機約會靈感\n"
         "\n"
         "記錄：\n"
-        "  /許願 <內容>          - 新增願望\n"
-        "  /願望                - 顯示你的願望清單（最近 10 筆）\n"
-        "  /心情 <內容>          - 記錄今天心情\n"
-        "  /回顧心情            - 顯示最近心情（最近 10 筆）\n"
+        "  許願 <內容>          - 新增願望\n"
+        "  願望                - 顯示你的願望清單（最近 10 筆）\n"
+        "  心情 <內容>          - 記錄今天心情\n"
+        "  回顧心情            - 顯示最近心情（最近 10 筆）\n"
         "\n"
         "紀念日：\n"
-        "  /設定紀念日 YYYY-MM-DD - 設定紀念日（每個 user 一份）\n"
-        "  /紀念日               - 顯示交往第幾天\n"
+        "  設定紀念日 YYYY-MM-DD - 設定紀念日（每個 user 一份）\n"
+        "  紀念日               - 顯示交往第幾天\n"
+        "\n"
+        "暱稱：\n"
+        "  設定暱稱 <名字>       - 設定她的暱稱（例如：設定暱稱 啊晡）\n"
         "\n"
         "管理（可選）：\n"
-        "  /新增情話 <內容>\n"
-        "  /列表情話\n"
-        "  /刪除情話 <id>\n"
-        "  /新增約會 <內容>\n"
+        "  新增情話 <內容>\n"
+        "  列表情話\n"
+        "  刪除情話 <id>\n"
+        "  新增約會 <內容>\n"
         "\n"
-        "提示：直接打 /help 或 /說明 也可以看到這份清單。"
+        "提示：直接打 help / 說明 / 幫助 也可以看到這份清單。\n"
+        "（也兼容 /help、/情話 這種舊打法）"
     )
 
 
 def _cmd(text: str) -> tuple[str, str]:
     """
-    解析 '/命令 參數...'，回傳 (命令, 參數字串)
+    解析 '指令 參數...'（不用 /），但也兼容 '/指令 參數...'
+    同時支援不打空白：例如 '許願我想吃拉麵'
+    回傳 (命令, 參數字串)
     """
-    t = text.strip()
-    if not t.startswith("/"):
-        return "", t
-    # split once
-    parts = t.split(" ", 1)
+    t = (text or "").strip()
+    if not t:
+        return "", ""
+
+    # 兼容 / 或 全形 ／
+    while t.startswith(("/", "／")):
+        t = t[1:].lstrip()
+
+    # 這些指令後面通常會跟參數；允許不打空白
+    cmds_with_arg = [
+        "新增情話",
+        "刪除情話",
+        "新增約會",
+        "許願",
+        "心情",
+        "設定紀念日",
+        "設定暱稱",
+        "設定啊晡",
+    ]
+
+    for c in cmds_with_arg:
+        if t.startswith(c) and len(t) > len(c):
+            arg = t[len(c):].strip()
+            return c, arg
+
+    # 一般情況：以第一個空白分隔
+    parts = t.split(None, 1)
     cmd = parts[0].strip()
     arg = parts[1].strip() if len(parts) == 2 else ""
     return cmd, arg
@@ -200,74 +231,73 @@ def _cmd(text: str) -> tuple[str, str]:
 def handle_command(user_id: str, text: str) -> str:
     cmd, arg = _cmd(text)
 
-    # aliases
-    if cmd in ("/help", "/說明", "/幫助"):
+    # aliases（不需要 /，但 _cmd() 會把 / 去掉，所以這裡只寫無斜線版本即可）
+    if cmd in ("help", "說明", "幫助"):
         return help_text()
 
-    if cmd in ("/情話",):
+    if cmd == "情話":
         row = random_love_line()
         if not row:
-            return "資料庫目前沒有情話。你可以用：/新增情話 你最可愛"
+            return "資料庫目前沒有情話。你可以用：新增情話 你最可愛"
         return f"💌 情話 #{row['id']}\n{row['text']}"
 
-    if cmd in ("/啊晡在幹嘛", "/阿晡在幹嘛", "/在幹嘛"):
+    if cmd in ("啊晡在幹嘛", "阿晡在幹嘛", "在幹嘛"):
         nickname = get_setting(user_id, "gf_nickname") or GIRLFRIEND_NICKNAME
         return infer_activity_message(nickname)
 
-    if cmd in ("/早安",):
+    if cmd == "早安":
         row = random_love_line()
         extra = row["text"] if row else "今天也要順順的。"
         return f"早安。\n{extra}"
 
-    if cmd in ("/晚安",):
+    if cmd == "晚安":
         row = random_love_line()
         extra = row["text"] if row else "做個好夢。"
         return f"晚安。\n{extra}"
 
-    if cmd in ("/約會",):
+    if cmd == "約會":
         idea = random_date_idea()
         if not idea:
-            return "目前沒有約會靈感。你可以用：/新增約會 去河堤散步"
+            return "目前沒有約會靈感。你可以用：新增約會 去河堤散步"
         return f"🎡 約會靈感\n{idea['text']}"
 
-    if cmd in ("/新增約會",):
+    if cmd == "新增約會":
         if not arg:
-            return "用法：/新增約會 <內容>"
+            return "用法：新增約會 <內容>"
         if not _is_admin(user_id):
             return "這個指令目前只開給管理員使用。"
         idea_id = add_date_idea(arg)
         return f"✅ 已新增約會靈感 #{idea_id}"
 
-    if cmd in ("/許願",):
+    if cmd == "許願":
         if not arg:
-            return "用法：/許願 <內容>"
+            return "用法：許願 <內容>"
         wid = add_wish(user_id, arg)
         return f"✅ 願望已記下來了（#{wid}）"
 
-    if cmd in ("/願望",):
+    if cmd == "願望":
         ws = list_wishes(user_id, limit=10)
         if not ws:
-            return "你目前沒有願望清單。用：/許願 <內容> 來新增"
+            return "你目前沒有願望清單。用：許願 <內容> 來新增"
         lines = [f"#{w['id']} {w['text']} ({w['created_at']})" for w in ws]
         return "📝 願望清單（最近 10 筆）\n" + "\n".join(lines)
 
-    if cmd in ("/心情",):
+    if cmd == "心情":
         if not arg:
-            return "用法：/心情 <內容>（例如：/心情 今天有點累但很想你）"
+            return "用法：心情 <內容>（例如：心情 今天有點累但很想你）"
         mid = add_mood(user_id, arg)
         return f"✅ 心情已記錄（#{mid}）"
 
-    if cmd in ("/回顧心情",):
+    if cmd == "回顧心情":
         ms = list_moods(user_id, limit=10)
         if not ms:
-            return "目前還沒有心情記錄。用：/心情 <內容> 來新增"
+            return "目前還沒有心情記錄。用：心情 <內容> 來新增"
         lines = [f"#{m['id']} {m['text']} ({m['created_at']})" for m in ms]
         return "📒 最近心情（最近 10 筆）\n" + "\n".join(lines)
 
-    if cmd in ("/設定紀念日",):
+    if cmd == "設定紀念日":
         if not arg:
-            return "用法：/設定紀念日 YYYY-MM-DD（例如：/設定紀念日 2024-06-01）"
-        # allow YYYY/MM/DD
+            return "用法：設定紀念日 YYYY-MM-DD（例如：設定紀念日 2024-06-01）"
         v = arg.replace("/", "-")
         try:
             datetime.date.fromisoformat(v)
@@ -276,34 +306,34 @@ def handle_command(user_id: str, text: str) -> str:
         set_setting(user_id, "anniversary", v)
         return f"✅ 紀念日已設定為 {v}"
 
-    if cmd in ("/紀念日",):
+    if cmd == "紀念日":
         v = get_setting(user_id, "anniversary") or os.getenv("RELATION_START_DATE", "")
         if not v:
-            return "你還沒設定紀念日。用：/設定紀念日 YYYY-MM-DD"
+            return "你還沒設定紀念日。用：設定紀念日 YYYY-MM-DD"
         try:
             start = datetime.date.fromisoformat(v)
         except Exception:
-            return "紀念日資料格式不正確，請重新設定：/設定紀念日 YYYY-MM-DD"
+            return "紀念日資料格式不正確，請重新設定：設定紀念日 YYYY-MM-DD"
         today = _tz_now().date()
         days = (today - start).days + 1
         return f"📅 我們在一起第 {days} 天\n（從 {start.isoformat()} 算起）"
 
-    if cmd in ("/設定啊晡", "/設定暱稱"):
+    if cmd in ("設定啊晡", "設定暱稱"):
         if not arg:
-            return "用法：/設定暱稱 <名字>（例如：/設定暱稱 啊晡）"
+            return "用法：設定暱稱 <名字>（例如：設定暱稱 啊晡）"
         set_setting(user_id, "gf_nickname", arg)
         return f"✅ 暱稱已設定為：{arg}"
 
     # 管理情話
-    if cmd in ("/新增情話",):
+    if cmd == "新增情話":
         if not arg:
-            return "用法：/新增情話 <內容>"
+            return "用法：新增情話 <內容>"
         if not _is_admin(user_id):
             return "這個指令目前只開給管理員使用。"
         lid = add_love_line(arg)
         return f"✅ 情話已新增 #{lid}"
 
-    if cmd in ("/列表情話",):
+    if cmd == "列表情話":
         if not _is_admin(user_id):
             return "這個指令目前只開給管理員使用。"
         rows = list_love_lines(limit=20)
@@ -312,42 +342,45 @@ def handle_command(user_id: str, text: str) -> str:
         lines = [f"#{r['id']} {r['text']}" for r in rows]
         return "📚 情話清單（最新 20 筆）\n" + "\n".join(lines)
 
-    if cmd in ("/刪除情話",):
+    if cmd == "刪除情話":
         if not arg:
-            return "用法：/刪除情話 <id>"
+            return "用法：刪除情話 <id>"
         if not _is_admin(user_id):
             return "這個指令目前只開給管理員使用。"
         try:
             lid = int(arg)
         except Exception:
-            return "id 必須是數字。用法：/刪除情話 12"
+            return "id 必須是數字。用法：刪除情話 12"
         ok = delete_love_line(lid)
         return f"🗑️ 已刪除 #{lid}" if ok else "❌ 找不到這筆 id"
 
-    # 非指令：給一個很溫柔的 fallback（避免已讀不回）
+    # 非指令：fallback（避免已讀不回）
     if not cmd:
-        # 你也可以改成：看到「想你/抱抱」就回固定句
         row = random_love_line()
         if row:
-            return f"我在。\n{row['text']}\n\n（想看指令打 /help）"
-        return "我在～（想看指令打 /help）"
+            return f"我在。\n{row['text']}\n\n（想看指令打 help）"
+        return "我在～（想看指令打 help）"
 
-    return "我看不懂這個指令耶，打 /help 我給你清單。"
+    # 如果輸入的是未知「單詞」，避免太常誤判，給提示即可
+    return "我看不懂這個指令耶，打 help 我給你清單。"
 
 
 def process_line_events(body):
     if not body or "events" not in body:
         return
+
     for ev in body.get("events", []):
         if ev.get("type") != "message":
             continue
+
         msg = ev.get("message", {})
         if msg.get("type") != "text":
             continue
 
         text = (msg.get("text") or "").strip()
         reply_token = ev.get("replyToken")
-        user_id = (ev.get("source") or {}).get("userId") or "unknown"
+        source = ev.get("source") or {}
+        user_id = source.get("userId") or "unknown"
 
         # optional: 顯示名稱
         profile = get_line_profile(user_id) or {}
