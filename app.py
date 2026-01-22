@@ -274,6 +274,21 @@ def build_media_url(message_id: str) -> str | None:
 
 
 def push_to_couple_text(message: str, fallback_user_id: str | None = None):
+    ids = [x for x in get_couple_user_ids(db_path=LOVE_DB_PATH) if x]
+    if len(ids) >= 2:
+        for uid in ids:
+            line_push_text(uid, message)
+        return
+
+    # fallback: if roles not fully set, still push to provided fallback / LINE_TARGET_USER_ID
+    fb: list[str] = []
+    if fallback_user_id:
+        fb.append(fallback_user_id)
+    if LINE_TARGET_USER_ID and LINE_TARGET_USER_ID not in fb:
+        fb.append(LINE_TARGET_USER_ID)
+    for uid in fb:
+        line_push_text(uid, message)
+
     ids = [x for x in get_couple_user_ids() if x]
     if len(ids) >= 2:
         for uid in ids:

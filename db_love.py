@@ -455,7 +455,7 @@ def set_active(db_path: str, user_id: str, is_active: bool):
     conn.close()
 
 
-def get_role_map_active(db_path: str) -> dict:
+def get_role_map_active(db_path: str = DEFAULT_DB) -> dict:
     conn = _conn(db_path)
     rows = conn.execute(
         """
@@ -471,7 +471,7 @@ def get_role_map_active(db_path: str) -> dict:
     return m
 
 
-def get_couple_user_ids(db_path: str) -> list[str]:
+def get_couple_user_ids(db_path: str = DEFAULT_DB) -> list[str]:
     m = get_role_map_active(db_path=db_path)
     ids = []
     if m.get("girlfriend"):
@@ -479,6 +479,7 @@ def get_couple_user_ids(db_path: str) -> list[str]:
     if m.get("boyfriend"):
         ids.append(m["boyfriend"])
     return ids
+
 
 
 def get_display_name(db_path: str, user_id: str) -> str:
