@@ -94,6 +94,38 @@ TEMP_LOW_THRESHOLD = float(os.getenv("TEMP_LOW_THRESHOLD", "14"))
 APP_TEMP_LOW_THRESHOLD = float(os.getenv("APP_TEMP_LOW_THRESHOLD", "14"))
 
 SETTINGS_GLOBAL_USER_ID = "__global__"
+def _parse_task_list_env(key: str, fallback: list[str]) -> list[str]:
+    """
+    Env 格式建議用 | 分隔，例如：
+    PHOTO_TASKS_FOR_GIRLFRIEND=自拍自己給我看|拍今日穿搭|拍你正在做的事
+    """
+    raw = (os.getenv(key) or "").strip()
+    if not raw:
+        return fallback
+    items = [x.strip() for x in raw.split("|") if x.strip()]
+    return items or fallback
+
+PHOTO_TASKS_FOR_GIRLFRIEND = _parse_task_list_env(
+    "PHOTO_TASKS_FOR_GIRLFRIEND",
+    [
+        "自拍自己給我看",
+        "拍你今天的穿搭",
+        "拍你正在做的事（工作/上課/耍廢都可以）",
+        "拍你手上的飲料或食物",
+        "拍你現在看到的風景",
+        "拍你笑一下（要露出可愛表情）",
+    ],
+)
+
+PHOTO_TASKS_FOR_SELF = _parse_task_list_env(
+    "PHOTO_TASKS_FOR_SELF",
+    [
+        "自拍給臭寶看",
+        "拍你今天的穿搭",
+        "拍你現在手邊在忙什麼",
+        "拍你附近的風景",
+    ],
+)
 
 def _get_threshold_float(key: str, default: float) -> float:
     v = get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=key)
