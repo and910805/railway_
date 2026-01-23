@@ -89,6 +89,21 @@ HUMIDITY_RANGE_THRESHOLD = float(os.getenv("HUMIDITY_RANGE_THRESHOLD", "25"))
 
 # Multi weather locations
 # WEATHER_LOCATIONS=新竹,24.8138,120.9675;台南市,22.99,120.185;鹽水,23.31,120.24;嘉義市,23.48,120.449722
+# app.py (near thresholds)
+TEMP_LOW_THRESHOLD = float(os.getenv("TEMP_LOW_THRESHOLD", "14"))
+APP_TEMP_LOW_THRESHOLD = float(os.getenv("APP_TEMP_LOW_THRESHOLD", "14"))
+
+SETTINGS_GLOBAL_USER_ID = "__global__"
+
+def _get_threshold_float(key: str, default: float) -> float:
+    v = get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=key)
+    if v is None or v == "":
+        return default
+    try:
+        return float(v)
+    except Exception:
+        return default
+
 def parse_weather_locations() -> list[dict]:
     raw = (os.getenv("WEATHER_LOCATIONS") or "").strip()
     out: list[dict] = []
@@ -280,27 +295,12 @@ def push_to_couple_text(message: str, fallback_user_id: str | None = None):
             line_push_text(uid, message)
         return
 
-    # fallback: if roles not fully set, still push to provided fallback / LINE_TARGET_USER_ID
     fb: list[str] = []
     if fallback_user_id:
         fb.append(fallback_user_id)
     if LINE_TARGET_USER_ID and LINE_TARGET_USER_ID not in fb:
         fb.append(LINE_TARGET_USER_ID)
-    for uid in fb:
-        line_push_text(uid, message)
 
-    ids = [x for x in get_couple_user_ids() if x]
-    if len(ids) >= 2:
-        for uid in ids:
-            line_push_text(uid, message)
-        return
-
-    # fallback: if roles not fully set, still push to provided fallback / LINE_TARGET_USER_ID
-    fb: list[str] = []
-    if fallback_user_id:
-        fb.append(fallback_user_id)
-    if LINE_TARGET_USER_ID and LINE_TARGET_USER_ID not in fb:
-        fb.append(LINE_TARGET_USER_ID)
     for uid in fb:
         line_push_text(uid, message)
 
@@ -357,64 +357,86 @@ def infer_activity_message(nickname: str) -> str:
 
 # ====== weather text builders (per city) ======
 def build_weather_alert_message(city_name: str, metrics: dict) -> str | None:
+    # existing thresholds
+    uv_th = _get_threshold_float("uv_high_threshold", UV_HIGH_THRESHOLD)
+    hum_th = _get_threshold_float("humidity_range_threshold", HUMIDITY_RANGE_THRESHOLD)
+
+    # new thresholds
+    temp_low_th = _get_threshold_float("temp_low_threshold", TEMP_LOW_THRESHOLD)
+    app_low_th = _get_threshold_float("app_temp_low_threshold", APP_TEMP_LOW_THRESHOLD)
+
     max_uv = metrics.get("max_uv")
-    min_h = metrics.get("min_humidity")
-    max_h = metrics.get("max_humidity")
     h_range = metrics.get("humidity_range")
+    tmin = metrics.get("min_temp")
+    amin = metrics.get("min_app_temp")
 
     triggers = []
-    if max_uv is not None and max_uv >= UV_HIGH_THRESHOLD:
+    if max_uv is not None and max_uv >= uv_th:
         triggers.append("uv")
-    if h_range is not None and h_range >= HUMIDITY_RANGE_THRESHOLD:
+    if h_range is not None and h_range >= hum_th:
         triggers.append("humidity")
+    if tmin is not None and tmin <= temp_low_th:
+        triggers.append("temp_low")
+    if amin is not None and amin <= app_low_th:
+        triggers.append("app_temp_low")
+
     if not triggers:
         return None
 
-    gf = DEFAULT_GIRLFRIEND_NICKNAME
-    uv_part = f"今天{city_name}紫外線偏高（UV最高約 {max_uv:.1f}）" if max_uv is not None else f"今天{city_name}紫外線偏高"
-    hum_part = ""
-    if min_h is not None and max_h is not None and h_range is not None:
-        hum_part = f"，濕度約 {min_h:.0f}%～{max_h:.0f}%（波動 {h_range:.0f}%）"
+    lines = []
+    # compose message parts
+    if "temp_low" in triggers or "app_temp_low" in triggers:
+        t_part = f"溫度最低約 {tmin:.1f}°C" if tmin is not None else "溫度偏低"
+        a_part = f"體感最低約 {amin:.1f}°C" if amin is not None else ""
+        lines.append(f"🧥 天氣提醒：今天 {city_name} 偏冷（{t_part}" + (f"，{a_part}" if a_part else "") + "）")
+        lines.append("出門記得加件外套、圍巾/帽子視情況。")
 
-    return "\n".join(
-        [
-            f"☀️ 天氣提醒：{uv_part}{hum_part}",
-            f"{gf} 出門記得擦防曬（記得用你那罐 Allie！）",
-            "回家也要注意退紅保養：Curél / 理膚寶水先厚敷保濕、避免太刺激的酸類。",
-        ]
-    )
+    if "uv" in triggers or "humidity" in triggers:
+        uv_part = f"UV 最高約 {max_uv:.1f}" if max_uv is not None else "UV 偏高"
+        hum_part = f"濕度波動約 {h_range:.0f}%" if h_range is not None else ""
+        lines.append(f"☀️ 另：{city_name} {uv_part}" + (f"，{hum_part}" if hum_part else ""))
 
-
-def build_weather_summary(city_name: str, metrics: dict) -> str:
-    max_uv = metrics.get("max_uv")
-    min_h = metrics.get("min_humidity")
-    max_h = metrics.get("max_humidity")
-    h_range = metrics.get("humidity_range")
-
-    lines = [f"🌦️ {city_name} 今日摘要"]
-    if max_uv is not None:
-        lines.append(f"UV 最高：約 {max_uv:.1f}")
-    if min_h is not None and max_h is not None and h_range is not None:
-        lines.append(f"濕度：約 {min_h:.0f}%～{max_h:.0f}%（波動 {h_range:.0f}%）")
     return "\n".join(lines)
 
 
-# ====== photo tasks: options + custom ======
-PHOTO_TASKS_FOR_GIRLFRIEND = [
-    "自拍一張（不用完美，真實就好）",
-    "拍你現在看到的天空（不要濾鏡）",
-    "拍你今天吃的東西（要有近照）",
-    "拍一張今天的穿搭（全身或局部都可）",
-    "拍一張路上看到可愛的小東西（招牌/娃娃/貓都行）",
-]
 
-PHOTO_TASKS_FOR_SELF = [
-    "拍一張「你想給臭寶看的今天」（桌面/天空/路邊都可以）",
-    "拍你今天的晚餐，然後寫 10 字心得",
-    "拍一張你今天最開心的一瞬間（畫面即可）",
-    "拍一張你要跟臭寶分享的小細節（咖啡、車窗、夕陽都行）",
-    "拍一張你今天的穿搭（全身或局部都可）",
-]
+def build_weather_summary(city_name: str, metrics: dict) -> str:
+    lines = [f"🌦️ {city_name} 今日摘要"]
+
+    tn = metrics.get("temp_now")
+    tmin = metrics.get("min_temp")
+    tmax = metrics.get("max_temp")
+    if tn is not None or (tmin is not None and tmax is not None):
+        parts = []
+        if tn is not None:
+            parts.append(f"現在 {tn:.1f}°C")
+        if tmin is not None and tmax is not None:
+            parts.append(f"最低 {tmin:.1f}°C / 最高 {tmax:.1f}°C")
+        lines.append("溫度：" + "，".join(parts))
+
+    an = metrics.get("app_temp_now")
+    amin = metrics.get("min_app_temp")
+    amax = metrics.get("max_app_temp")
+    if an is not None or (amin is not None and amax is not None):
+        parts = []
+        if an is not None:
+            parts.append(f"現在 {an:.1f}°C")
+        if amin is not None and amax is not None:
+            parts.append(f"最低 {amin:.1f}°C / 最高 {amax:.1f}°C")
+        lines.append("體感：" + "，".join(parts))
+
+    max_uv = metrics.get("max_uv")
+    if max_uv is not None:
+        lines.append(f"UV 最高：約 {max_uv:.1f}")
+
+    min_h = metrics.get("min_humidity")
+    max_h = metrics.get("max_humidity")
+    h_range = metrics.get("humidity_range")
+    if min_h is not None and max_h is not None and h_range is not None:
+        lines.append(f"濕度：約 {min_h:.0f}%～{max_h:.0f}%（波動 {h_range:.0f}%）")
+
+    return "\n".join(lines)
+
 
 
 def photo_options_text(target: str) -> str:
@@ -858,6 +880,46 @@ def handle_command(user_id: str, text: str) -> str:
             metrics = fetch_today_weather_metrics(lat=loc["lat"], lon=loc["lon"], timezone=TIMEZONE)
             blocks.append(build_weather_summary(name, metrics))
         return "\n\n".join(blocks) if blocks else "⚠️ 尚未設定 WEATHER_LOCATIONS"
+    if cmd in ("設定低溫", "設定體感低溫", "設定UV", "設定濕度波動"):
+        if ADMIN_LINE_USER_IDS and user_id not in ADMIN_LINE_USER_IDS:
+            return "⚠️ 只有管理者可以調整天氣門檻。"
+
+        if not arg:
+            return (
+                "用法：\n"
+                "• 設定低溫 14\n"
+                "• 設定體感低溫 13\n"
+                "• 設定UV 8\n"
+                "• 設定濕度波動 25"
+            )
+
+        try:
+            val = float(arg.strip())
+        except Exception:
+            return "數值格式錯誤，請輸入數字（例如：設定低溫 14）"
+
+        key_map = {
+            "設定低溫": "temp_low_threshold",
+            "設定體感低溫": "app_temp_low_threshold",
+            "設定UV": "uv_high_threshold",
+            "設定濕度波動": "humidity_range_threshold",
+        }
+        k = key_map[cmd]
+        set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=k, value=str(val))
+        return f"✅ 已更新門檻：{cmd} = {val}"
+
+    if cmd in ("查看天氣門檻", "天氣門檻"):
+        uv_th = _get_threshold_float("uv_high_threshold", UV_HIGH_THRESHOLD)
+        hum_th = _get_threshold_float("humidity_range_threshold", HUMIDITY_RANGE_THRESHOLD)
+        t_th = _get_threshold_float("temp_low_threshold", TEMP_LOW_THRESHOLD)
+        a_th = _get_threshold_float("app_temp_low_threshold", APP_TEMP_LOW_THRESHOLD)
+        return (
+            "📌 目前天氣提醒門檻\n"
+            f"• UV ≥ {uv_th}\n"
+            f"• 濕度波動 ≥ {hum_th}%\n"
+            f"• 最低溫 ≤ {t_th}°C\n"
+            f"• 最低體感 ≤ {a_th}°C"
+        )
 
     if cmd == "天氣提醒":
         # 天氣提醒 / 天氣提醒 鹽水

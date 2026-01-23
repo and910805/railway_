@@ -5,6 +5,7 @@ import datetime
 import time
 import random
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 DEFAULT_DB = os.getenv("LOVE_DB_PATH", "/data/love.db")
 
@@ -15,9 +16,24 @@ SQLITE_MAX_RETRIES = int(os.getenv("SQLITE_MAX_RETRIES", "6"))
 SQLITE_RETRY_BASE_MS = int(os.getenv("SQLITE_RETRY_BASE_MS", "80"))
 
 
+def _tz() -> ZoneInfo:
+    tzname = os.getenv("TIMEZONE", "Asia/Taipei")
+    try:
+        return ZoneInfo(tzname)
+    except Exception:
+        return ZoneInfo("UTC")
+
 def _tz_now_iso() -> str:
-    # ISO string; keep simple & stable
-    return datetime.datetime.now().isoformat(timespec="seconds")
+    return datetime.datetime.now(_tz()).isoformat(timespec="seconds")
+
+def _parse_dt_any(s: str) -> datetime.datetime:
+    # 支援 ...Z
+    s = (s or "").replace("Z", "+00:00")
+    dt = datetime.datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_tz())
+    return dt.astimezone(_tz())
+
 
 
 def _conn(db_path: str):
@@ -529,38 +545,48 @@ def list_open_photo_tasks(db_path: str, limit: int = 10) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def claim_latest_open_task_for_role(db_path: str, role: str, expire_minutes: int = 180) -> Optional[dict]:
-    now = datetime.datetime.now()
-    conn = _conn(db_path)
-
-    row = conn.execute(
-        """
-        SELECT id, text, expires_at
-        FROM photo_tasks
-        WHERE status='open' AND assign_role=?
-        ORDER BY id DESC
-        LIMIT 1
-        """,
-        (role,),
-    ).fetchone()
-
-    if not row:
-        conn.close()
-        return None
-
+def claim_latest_open_task_for_role(db_path: str, role: str, expire_minutes: int = 180):
+    conn = _connect(db_path)
     try:
-        exp = datetime.datetime.fromisoformat(row["expires_at"])
-    except Exception:
-        exp = None
+        now = datetime.datetime.now(_tz())
 
-    if exp and exp < now:
+        # 抓多筆，順便把過期的 open 清成 expired，避免永遠卡在「最新一筆已過期」的狀態
+        rows = conn.execute(
+            """
+            SELECT id, text, expires_at
+            FROM photo_tasks
+            WHERE status='open' AND assign_role=?
+            ORDER BY id DESC
+            LIMIT 10
+            """,
+            (role,),
+        ).fetchall()
+
+        picked = None
+        for row in rows:
+            exp_raw = row["expires_at"]
+            exp = _parse_dt_any(exp_raw) if exp_raw else None
+
+            if exp and exp < now:
+                _execute(conn, "UPDATE photo_tasks SET status='expired' WHERE id=?", (row["id"],))
+                continue
+
+            picked = row
+            break
+
+        if not picked:
+            conn.commit()
+            return None
+
+        _execute(
+            conn,
+            "UPDATE photo_tasks SET status='done', done_at=? WHERE id=?",
+            (_tz_now_iso(), picked["id"]),
+        )
+        conn.commit()
+        return {"id": picked["id"], "text": picked["text"], "expires_at": picked["expires_at"]}
+    finally:
         conn.close()
-        return None
-
-    _execute(conn, "UPDATE photo_tasks SET status='done', done_at=? WHERE id=?", (_tz_now_iso(), row["id"]))
-    conn.commit()
-    conn.close()
-    return {"id": row["id"], "text": row["text"], "expires_at": row["expires_at"]}
 
 
 # ===== media =====
