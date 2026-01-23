@@ -1167,7 +1167,7 @@ def process_line_events(body):
             except Exception as e:
                 print("[MEDIA] image handling error:", e, flush=True)
                 if reply_token:
-                    line_reply(reply_token, "✅ 我收到照片了，但處理/轉送失敗（可能 PUBLIC_BASE_URL 未設定或下載失敗）。")
+                    line_reply(reply_token, f"✅ 我收到照片了，但處理/轉送失敗：{e}")
             continue
 
         preview = f"[{msg_type}]"

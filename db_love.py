@@ -546,7 +546,7 @@ def list_open_photo_tasks(db_path: str, limit: int = 10) -> list[dict]:
 
 
 def claim_latest_open_task_for_role(db_path: str, role: str, expire_minutes: int = 180):
-    conn = _connect(db_path)
+    conn = _conn(db_path)
     try:
         now = datetime.datetime.now(_tz())
 
