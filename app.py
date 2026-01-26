@@ -354,6 +354,37 @@ def push_and_log(
             str(e),
         )
         raise
+def build_med_pill_message(remind_count: int) -> str:
+    # 第 1 次（23:00）
+    if remind_count <= 0:
+        return (
+            "吃藥提醒：\n"
+            "事前藥不能中斷，請記得服用。\n"
+            "吃完回我：吃完 23:05（或直接回：吃了）"
+        )
+
+    # 第 2 次
+    if remind_count == 1:
+        return (
+            "再提醒一次：\n"
+            "今天的事前藥還沒回報。\n"
+            "請吃完後立刻回覆時間。"
+        )
+
+    # 第 3 次
+    if remind_count == 2:
+        return (
+            "重要提醒：\n"
+            "事前藥必須每天準時服用。\n"
+            "請立即處理並回覆我。"
+        )
+
+    # 第 4 次以上（嚴肅）
+    return (
+        "⚠️ 警告提醒：\n"
+        "你今天尚未回報服用事前藥。\n"
+        "請現在立刻服用並回覆「吃了」。"
+    )
 
 # ====== LINE helpers ======
 def _line_headers():
@@ -1551,10 +1582,16 @@ def scheduled_med_pill_daily():
     if row.get("taken_at"):
         return
 
-    msg = (
-        "吃藥提醒：事前藥不能中斷。\n"
-        "吃完回我：吃完 21:30（或直接回：吃了 / 吃完）"
+    row = get_med_pill_row(db_path=LOVE_DB_PATH, user_id=gf_id, day=day) or {}
+    msg = build_med_pill_message(int(row.get("remind_count") or 0))
+
+    line_push_text(
+        gf_id,
+        msg,
+        reason="MED_DAILY",
+        target_role="girlfriend",
     )
+
     push_and_log(
     gf_id,
     msg,
@@ -1591,11 +1628,17 @@ def scheduled_med_pill_nudge():
     if last and (now - last).total_seconds() < MED_PILL_NUDGE_MINUTES * 60:
         return
 
-    msg = (
-        "再提醒一次：事前藥不能中斷。\n"
-        "吃完回我：吃完 21:30（或直接回：吃了 / 吃完）"
+    row = get_med_pill_row(db_path=LOVE_DB_PATH, user_id=gf_id, day=day) or {}
+    msg = build_med_pill_message(int(row.get("remind_count") or 0))
+
+    push_and_log(
+        gf_id,
+        msg,
+        reason="MED_NUDGE",
+        target_role="girlfriend",
     )
-    line_push_text(gf_id, msg)
+
+
     mark_med_pill_reminded(db_path=LOVE_DB_PATH, user_id=gf_id, day=day, remind_at_iso=now.isoformat(timespec="seconds"))
     print("[SCHED][MED] nudge pushed.", flush=True)
 
