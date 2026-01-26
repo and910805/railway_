@@ -56,6 +56,13 @@ from db_love import (
 
 
 from weather_client import fetch_today_weather_metrics
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("love-bot")
 
 app = Flask(__name__)
 
@@ -315,6 +322,37 @@ def _extract_taken_dt_and_label(text: str, now: datetime.datetime) -> tuple[date
     # fallback: reported now
     return now, now.strftime("%H:%M")
 
+def push_and_log(
+    to_user_id: str,
+    message: str,
+    *,
+    reason: str,
+    target_role: str | None = None,
+):
+    """
+    Unified LINE push with logging
+    """
+    preview = message.replace("\n", " ")[:80]
+
+    logger.info(
+        "[PUSH][%s] to=%s role=%s msg=\"%s\"",
+        reason,
+        to_user_id,
+        target_role,
+        preview,
+    )
+
+    try:
+        line_push_text(to_user_id, message)
+    except Exception as e:
+        logger.error(
+            "[PUSH][%s][FAILED] to=%s role=%s err=%s",
+            reason,
+            to_user_id,
+            target_role,
+            str(e),
+        )
+        raise
 
 # ====== LINE helpers ======
 def _line_headers():
@@ -886,7 +924,13 @@ def handle_command(user_id: str, text: str) -> str:
             rm = get_role_map_active(db_path=LOVE_DB_PATH)  # maps girlfriend/boyfriend :contentReference[oaicite:9]{index=9}
             bf_id = rm.get("boyfriend")
             if bf_id:
-                line_push_text(bf_id, f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天已吃事前藥（{label}）。")
+                push_and_log(
+                    bf_id,
+                    f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天已吃事前藥（{label}）。",
+                    reason="MED_CONFIRM_NOTIFY",
+                    target_role="boyfriend",
+                )
+
 
             return f"收到～我記錄你今天 {label} 吃藥，並已通知 {DEFAULT_SELF_NICKNAME}。"
     except Exception as e:
@@ -1384,7 +1428,13 @@ def scheduled_med_pill_daily():
         "吃藥提醒：事前藥不能中斷。\n"
         "吃完回我：吃完 21:30（或直接回：吃了 / 吃完）"
     )
-    line_push_text(gf_id, msg)
+    push_and_log(
+    gf_id,
+    msg,
+    reason="MED_DAILY",
+    target_role="girlfriend",
+    )
+
     mark_med_pill_reminded(db_path=LOVE_DB_PATH, user_id=gf_id, day=day, remind_at_iso=now.isoformat(timespec="seconds"))
     print("[SCHED][MED] daily pill reminder pushed.", flush=True)
 
