@@ -7,6 +7,7 @@ import datetime
 import mimetypes
 from pathlib import Path
 from typing import Optional
+import re
 
 import requests
 from flask import Flask, jsonify, request, send_file, abort
@@ -14,6 +15,10 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from db_love import (
+    ensure_med_pill_row,
+    get_med_pill_row,
+    set_med_pill_taken,
+    mark_med_pill_reminded,
     seed_defaults,
     # love lines
     random_love_line,
@@ -75,6 +80,11 @@ MEDIA_ACCESS_TOKEN = os.getenv("MEDIA_ACCESS_TOKEN", "").strip()
 
 # Scheduler
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "0") == "1"
+# Medication (pill) reminder
+MED_PILL_ENABLED = os.getenv("MED_PILL_ENABLED", "0") == "1"
+MED_PILL_REMIND_TIME = os.getenv("MED_PILL_REMIND_TIME", "21:30")          # HH:MM
+MED_PILL_NUDGE_MINUTES = int(os.getenv("MED_PILL_NUDGE_MINUTES", "30"))    # every 30 min if no reply
+MED_PILL_QUIET_HOURS = os.getenv("MED_PILL_QUIET_HOURS", "00:00-07:00")    # set "" to disable
 
 # Photo task expiry minutes (for auto "交作業" matching)
 PHOTO_TASK_EXPIRE_MIN = int(os.getenv("PHOTO_TASK_EXPIRE_MIN", "180"))
@@ -224,6 +234,86 @@ def _mins_ago(dt: Optional[datetime.datetime]) -> Optional[int]:
         return None
     delta = _tz_now() - dt
     return int(delta.total_seconds() // 60)
+
+def _parse_hhmm(s: str, default=(21, 30)) -> tuple[int, int]:
+    s = (s or "").strip()
+    m = re.fullmatch(r"(\d{1,2})\s*[:：]\s*(\d{2})", s)
+    if not m:
+        return default
+    h = int(m.group(1))
+    mm = int(m.group(2))
+    if 0 <= h <= 23 and 0 <= mm <= 59:
+        return (h, mm)
+    return default
+
+_MED_HOUR, _MED_MIN = _parse_hhmm(MED_PILL_REMIND_TIME)
+
+def _in_quiet_hours(now: datetime.datetime) -> bool:
+    raw = (MED_PILL_QUIET_HOURS or "").strip()
+    if not raw:
+        return False
+    m = re.fullmatch(r"(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})", raw)
+    if not m:
+        return False
+    sh, sm = _parse_hhmm(m.group(1), default=(0, 0))
+    eh, em = _parse_hhmm(m.group(2), default=(7, 0))
+    start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    end = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+    if end <= start:
+        # crosses midnight
+        return now >= start or now <= end
+    return start <= now <= end
+
+def _is_pill_confirm_text(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+
+    # If user explicitly mentions pill/medicine, be more flexible
+    if any(k in t for k in ("藥", "事前", "避孕")):
+        return any(k in t for k in ("吃了", "吃完", "已吃", "吃藥", "服用", "已服用"))
+
+    # Otherwise, only accept short/strict confirmations to avoid false positives (e.g., "吃了拉麵")
+    patterns = [
+        r"^(?:我)?(?:已)?吃(?:了|完)$",
+        r"^(?:我)?(?:已)?吃(?:了|完)\s*\d{1,2}\s*[:：]\s*\d{2}$",
+        r"^(?:我)?(?:已)?吃(?:了|完)\s*\d{1,2}\s*(?:點|時|时)\s*(?:\d{1,2}\s*分?)?$",
+        r"^(?:我)?(?:已)?吃(?:了|完)\s*\d{1,2}\s*(?:點|時|时)\s*半$",
+        r"^(?:我)?吃藥(?:了)?$",
+        r"^(?:我)?吃藥(?:了)?\s*\d{1,2}\s*[:：]\s*\d{2}$",
+    ]
+    return any(re.fullmatch(p, t) for p in patterns)
+
+def _extract_taken_dt_and_label(text: str, now: datetime.datetime) -> tuple[datetime.datetime, str]:
+    t = (text or "").strip()
+
+    # HH:MM
+    m = re.search(r"(\d{1,2})\s*[:：]\s*(\d{2})", t)
+    if m:
+        h, mm = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mm <= 59:
+            dt = now.replace(hour=h, minute=mm, second=0, microsecond=0)
+            return dt, f"{h:02d}:{mm:02d}"
+
+    # H點半
+    m = re.search(r"(\d{1,2})\s*(?:點|時|时)\s*半", t)
+    if m:
+        h = int(m.group(1))
+        if 0 <= h <= 23:
+            dt = now.replace(hour=h, minute=30, second=0, microsecond=0)
+            return dt, f"{h:02d}:30"
+
+    # H點(分)
+    m = re.search(r"(\d{1,2})\s*(?:點|時|时)\s*(\d{1,2})?\s*(?:分)?", t)
+    if m:
+        h = int(m.group(1))
+        mm = int(m.group(2)) if (m.group(2) is not None and m.group(2) != "") else 0
+        if 0 <= h <= 23 and 0 <= mm <= 59:
+            dt = now.replace(hour=h, minute=mm, second=0, microsecond=0)
+            return dt, f"{h:02d}:{mm:02d}"
+
+    # fallback: reported now
+    return now, now.strftime("%H:%M")
 
 
 # ====== LINE helpers ======
@@ -775,6 +865,33 @@ def forward_image_to_other_party(sender_user_id: str, sender_name: str, message_
 
 # ====== command handler ======
 def handle_command(user_id: str, text: str) -> str:
+    # ===== medication: pill confirmation from girlfriend =====
+    try:
+        role = get_user_role(db_path=LOVE_DB_PATH, user_id=user_id)
+        if role == "girlfriend" and _is_pill_confirm_text(text):
+            now = _tz_now()
+            taken_dt, label = _extract_taken_dt_and_label(text, now)
+            day = now.date().isoformat()
+
+            set_med_pill_taken(
+                db_path=LOVE_DB_PATH,
+                user_id=user_id,
+                day=day,
+                taken_at_iso=taken_dt.isoformat(timespec="seconds"),
+                taken_time_text=label,
+                reported_text=text,
+            )
+
+            # notify boyfriend (臭晡晡)
+            rm = get_role_map_active(db_path=LOVE_DB_PATH)  # maps girlfriend/boyfriend :contentReference[oaicite:9]{index=9}
+            bf_id = rm.get("boyfriend")
+            if bf_id:
+                line_push_text(bf_id, f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天已吃事前藥（{label}）。")
+
+            return f"收到～我記錄你今天 {label} 吃藥，並已通知 {DEFAULT_SELF_NICKNAME}。"
+    except Exception as e:
+        print("[MED] pill confirm error:", e, flush=True)
+
     cmd, arg = _cmd(text)
 
     if cmd in ("help", "說明", "幫助"):
@@ -798,6 +915,17 @@ def handle_command(user_id: str, text: str) -> str:
     if cmd == "退出推播":
         set_active(db_path=LOVE_DB_PATH, user_id=user_id, is_active=False)
         return "✅ 已退出推播。"
+    if cmd in ("吃藥狀態", "藥狀態"):
+        rm = get_role_map_active(db_path=LOVE_DB_PATH)
+        gf_id = rm.get("girlfriend")
+        if not gf_id:
+            return "目前沒有設定 girlfriend/boyfriend 角色，先用「設定角色」把雙方設好。"
+        now = _tz_now()
+        day = now.date().isoformat()
+        row = get_med_pill_row(db_path=LOVE_DB_PATH, user_id=gf_id, day=day) or {}
+        if row.get("taken_at"):
+            return f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天已回報吃藥（{row.get('taken_time_text') or '已記錄'}）。"
+        return f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天尚未回報吃藥。已提醒 {int(row.get('remind_count') or 0)} 次。"
 
     # conversation bridge
     if cmd in ("對話狀態", "狀態", "臭寶有沒有在跟我對話", "她在嗎", "有在嗎"):
@@ -1235,6 +1363,64 @@ def scheduled_weather_check():
         print("[SCHED] Weather alert pushed.", flush=True)
     except Exception as e:
         print("[SCHED] scheduled_weather_check error:", e, flush=True)
+def scheduled_med_pill_daily():
+    if not MED_PILL_ENABLED:
+        return
+    rm = get_role_map_active(db_path=LOVE_DB_PATH)
+    gf_id = rm.get("girlfriend")
+    if not gf_id:
+        return
+
+    now = _tz_now()
+    if _in_quiet_hours(now):
+        return
+
+    day = now.date().isoformat()
+    row = get_med_pill_row(db_path=LOVE_DB_PATH, user_id=gf_id, day=day) or {}
+    if row.get("taken_at"):
+        return
+
+    msg = (
+        "吃藥提醒：事前藥不能中斷。\n"
+        "吃完回我：吃完 21:30（或直接回：吃了 / 吃完）"
+    )
+    line_push_text(gf_id, msg)
+    mark_med_pill_reminded(db_path=LOVE_DB_PATH, user_id=gf_id, day=day, remind_at_iso=now.isoformat(timespec="seconds"))
+    print("[SCHED][MED] daily pill reminder pushed.", flush=True)
+
+def scheduled_med_pill_nudge():
+    if not MED_PILL_ENABLED:
+        return
+    rm = get_role_map_active(db_path=LOVE_DB_PATH)
+    gf_id = rm.get("girlfriend")
+    if not gf_id:
+        return
+
+    now = _tz_now()
+    if _in_quiet_hours(now):
+        return
+
+    # only start nudging after remind time
+    remind_dt = now.replace(hour=_MED_HOUR, minute=_MED_MIN, second=0, microsecond=0)
+    if now < remind_dt:
+        return
+
+    day = now.date().isoformat()
+    row = get_med_pill_row(db_path=LOVE_DB_PATH, user_id=gf_id, day=day) or {}
+    if row.get("taken_at"):
+        return
+
+    last = _parse_dt(row.get("last_remind_at"))
+    if last and (now - last).total_seconds() < MED_PILL_NUDGE_MINUTES * 60:
+        return
+
+    msg = (
+        "再提醒一次：事前藥不能中斷。\n"
+        "吃完回我：吃完 21:30（或直接回：吃了 / 吃完）"
+    )
+    line_push_text(gf_id, msg)
+    mark_med_pill_reminded(db_path=LOVE_DB_PATH, user_id=gf_id, day=day, remind_at_iso=now.isoformat(timespec="seconds"))
+    print("[SCHED][MED] nudge pushed.", flush=True)
 
 
 def start_scheduler():
@@ -1245,9 +1431,30 @@ def start_scheduler():
     sched.add_job(scheduled_weather_check, "cron", hour=8, minute=30, id="weather_0830", replace_existing=True)
     sched.add_job(scheduled_weather_check, "cron", hour=12, minute=30, id="weather_1230", replace_existing=True)
     sched.add_job(scheduled_weather_check, "cron", hour=17, minute=30, id="weather_1730", replace_existing=True)
+
+    # medication reminder
+    if MED_PILL_ENABLED:
+        sched.add_job(
+            scheduled_med_pill_daily,
+            "cron",
+            hour=_MED_HOUR,
+            minute=_MED_MIN,
+            id="med_pill_daily",
+            replace_existing=True,
+        )
+        # run frequently, but only push if >= MED_PILL_NUDGE_MINUTES since last reminder
+        sched.add_job(
+            scheduled_med_pill_nudge,
+            "interval",
+            minutes=5,
+            id="med_pill_nudge",
+            replace_existing=True,
+        )
+
     sched.start()
     _scheduler = sched
     print("[SCHED] started.", flush=True)
+
 
 
 if ENABLE_SCHEDULER:

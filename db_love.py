@@ -206,6 +206,31 @@ def seed_defaults(db_path: str = DEFAULT_DB):
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_processed_messages_user ON processed_messages(user_id);")
+    
+    # medication: daily pill reminder log/state
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS med_pills (
+            day TEXT NOT NULL,                 -- YYYY-MM-DD (bot timezone)
+            user_id TEXT NOT NULL,             -- LINE userId (girlfriend)
+            required INTEGER NOT NULL DEFAULT 1,
+
+            taken_at TEXT,                     -- ISO datetime when taken (or reported)
+            taken_time_text TEXT,              -- HH:MM derived for display
+            reported_text TEXT,                -- original user message
+
+            last_remind_at TEXT,               -- ISO datetime
+            remind_count INTEGER NOT NULL DEFAULT 0,
+
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+
+            PRIMARY KEY(day, user_id)
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_med_pills_user_day ON med_pills(user_id, day);")
+
 
     conn.commit()
 
@@ -255,6 +280,101 @@ def seed_defaults(db_path: str = DEFAULT_DB):
 
     conn.close()
 
+# ===== medication: pill reminders =====
+def _today_str() -> str:
+    return datetime.datetime.now(_tz()).date().isoformat()
+
+def ensure_med_pill_row(db_path: str, user_id: str, day: str | None = None) -> dict:
+    day = day or _today_str()
+    conn = _conn(db_path)
+    try:
+        now = _tz_now_iso()
+        _execute(
+            conn,
+            """
+            INSERT OR IGNORE INTO med_pills(day, user_id, created_at, updated_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (day, user_id, now, now),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM med_pills WHERE day=? AND user_id=?", (day, user_id)).fetchone()
+        return dict(row) if row else {"day": day, "user_id": user_id}
+    finally:
+        conn.close()
+
+def get_med_pill_row(db_path: str, user_id: str, day: str | None = None) -> Optional[dict]:
+    day = day or _today_str()
+    conn = _conn(db_path)
+    try:
+        row = conn.execute("SELECT * FROM med_pills WHERE day=? AND user_id=?", (day, user_id)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+def set_med_pill_taken(
+    db_path: str,
+    user_id: str,
+    taken_at_iso: str,
+    day: str | None = None,
+    taken_time_text: str | None = None,
+    reported_text: str | None = None,
+):
+    day = day or _today_str()
+    conn = _conn(db_path)
+    try:
+        now = _tz_now_iso()
+        _execute(
+            conn,
+            """
+            INSERT OR IGNORE INTO med_pills(day, user_id, created_at, updated_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (day, user_id, now, now),
+        )
+        _execute(
+            conn,
+            """
+            UPDATE med_pills
+            SET taken_at=?,
+                taken_time_text=?,
+                reported_text=?,
+                updated_at=?
+            WHERE day=? AND user_id=?
+            """,
+            (taken_at_iso, taken_time_text, reported_text, now, day, user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def mark_med_pill_reminded(db_path: str, user_id: str, remind_at_iso: str, day: str | None = None):
+    day = day or _today_str()
+    conn = _conn(db_path)
+    try:
+        now = _tz_now_iso()
+        _execute(
+            conn,
+            """
+            INSERT OR IGNORE INTO med_pills(day, user_id, created_at, updated_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (day, user_id, now, now),
+        )
+        _execute(
+            conn,
+            """
+            UPDATE med_pills
+            SET last_remind_at=?,
+                remind_count=COALESCE(remind_count, 0) + 1,
+                updated_at=?
+            WHERE day=? AND user_id=?
+            """,
+            (remind_at_iso, now, day, user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 # ===== dedupe =====
 def mark_message_processed(db_path: str, message_id: str, user_id: str, msg_type: str) -> bool:
