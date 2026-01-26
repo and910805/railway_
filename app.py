@@ -20,6 +20,7 @@ from db_love import (
     set_med_pill_taken,
     mark_med_pill_reminded,
     seed_defaults,
+    clear_med_pill_taken,
     # love lines
     random_love_line,
     add_love_line,
@@ -998,6 +999,31 @@ def handle_command(user_id: str, text: str) -> str:
         if row.get("taken_at"):
             return f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天已回報吃藥（{row.get('taken_time_text') or '已記錄'}）。"
         return f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天尚未回報吃藥。已提醒 {int(row.get('remind_count') or 0)} 次。"
+    if cmd in ("取消吃藥", "重置吃藥", "撤銷吃藥"):
+        rm = get_role_map_active(db_path=LOVE_DB_PATH)
+        gf_id = rm.get("girlfriend")
+        if not gf_id:
+            return "目前沒有設定 girlfriend/boyfriend 角色，先用「我是臭寶 / 我是臭晡晡」設好。"
+
+        # 允許男方或女方都能清（避免女方誤傳時男方不在也能自救）
+        role = get_user_role(db_path=LOVE_DB_PATH, user_id=user_id)
+        if role not in ("boyfriend", "girlfriend"):
+            return "只有臭寶或臭晡晡可以使用這個指令。"
+
+        day = _tz_now().date().isoformat()
+
+        row = get_med_pill_row(db_path=LOVE_DB_PATH, user_id=gf_id, day=day) or {}
+        if not row.get("taken_at"):
+            return f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天本來就沒有『已吃藥』紀錄，不需要取消。"
+
+        clear_med_pill_taken(db_path=LOVE_DB_PATH, user_id=gf_id, day=day)
+
+        # 同步通知另一方，避免資訊不一致
+        other_id = rm.get("boyfriend" if role == "girlfriend" else "girlfriend")
+        if other_id:
+            line_push_text(other_id, f"已撤銷今天的吃藥回報紀錄（{day}）。")
+
+        return f"已撤銷 {DEFAULT_GIRLFRIEND_NICKNAME} 今天的吃藥回報紀錄（{day}）。"
 
     # conversation bridge
     if cmd in ("對話狀態", "狀態", "臭寶有沒有在跟我對話", "她在嗎", "有在嗎"):

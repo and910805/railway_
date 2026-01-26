@@ -347,6 +347,26 @@ def set_med_pill_taken(
         conn.commit()
     finally:
         conn.close()
+def clear_med_pill_taken(db_path: str, user_id: str, day: str | None = None):
+    day = day or _today_str()
+    conn = _conn(db_path)
+    try:
+        now = _tz_now_iso()
+        _execute(
+            conn,
+            """
+            UPDATE med_pills
+            SET taken_at=NULL,
+                taken_time_text=NULL,
+                reported_text=NULL,
+                updated_at=?
+            WHERE day=? AND user_id=?
+            """,
+            (now, day, user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 def mark_med_pill_reminded(db_path: str, user_id: str, remind_at_iso: str, day: str | None = None):
     day = day or _today_str()
