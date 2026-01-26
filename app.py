@@ -389,15 +389,43 @@ def line_reply(reply_token: str, message: str):
 
 def line_push_messages(to_user_id: str, messages: list[dict]):
     if not LINE_CHANNEL_ACCESS_TOKEN or not to_user_id:
+        logger.warning("[LINE_PUSH][SKIP] token_missing=%s to_empty=%s", not bool(LINE_CHANNEL_ACCESS_TOKEN), not bool(to_user_id))
         return
+
     url = "https://api.line.me/v2/bot/message/push"
     body = {"to": to_user_id, "messages": messages}
+
+    # 你要的：log 出「送了什麼」
+    # 把 messages 裡每個 message 的 type 與文字摘要印出來（圖片/貼圖也看得到 type）
+    parts = []
+    for m in messages or []:
+        mtype = (m or {}).get("type")
+        if mtype == "text":
+            txt = (m.get("text") or "").replace("\n", "\\n")
+            parts.append(f"text:{txt[:500]}")
+        else:
+            parts.append(f"{mtype}")
+    logger.info('[LINE_PUSH][REQ] to=%s messages=%s', to_user_id, " | ".join(parts)[:2000])
+
     try:
         resp = requests.post(url, headers=_line_headers(), json=body, timeout=10)
-        if resp.status_code != 200:
-            print("Push status:", resp.status_code, "body:", resp.text[:300], flush=True)
+
+        # 你要的：log 出「已送出 OK」（LINE 回 2xx 才算）
+        if 200 <= resp.status_code < 300:
+            logger.info("[LINE_PUSH][OK] to=%s status=%s", to_user_id, resp.status_code)
+            return
+
+        # 失敗：印出回應內容
+        logger.error(
+            '[LINE_PUSH][FAIL] to=%s status=%s body="%s"',
+            to_user_id,
+            resp.status_code,
+            (resp.text or "")[:800],
+        )
     except Exception as e:
-        print("Push error:", e, flush=True)
+        logger.exception("[LINE_PUSH][EXCEPTION] to=%s err=%s", to_user_id, str(e))
+        raise
+
 
 
 def line_push_text(to_user_id: str, text: str):
