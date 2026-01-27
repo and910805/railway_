@@ -1521,7 +1521,37 @@ def help_quick_text(base_url: str) -> str:
 
 def build_help_flex(base_url: str, dash_login_url: str | None = None) -> dict:
     # Flex Message bubble
-    footer_contents = []
+
+    def _msg_btn(label: str, text: str, style: str = "secondary") -> dict:
+        return {
+            "type": "button",
+            "style": style,
+            "height": "sm",
+            "action": {"type": "message", "label": label, "text": text},
+        }
+
+    def _uri_btn(label: str, uri: str, style: str = "secondary") -> dict:
+        return {
+            "type": "button",
+            "style": style,
+            "height": "sm",
+            "action": {"type": "uri", "label": label, "uri": uri},
+        }
+
+    def _row(btn_left: dict, btn_right: dict | None = None) -> dict:
+        contents = [dict(btn_left)]
+        if btn_right:
+            contents.append(dict(btn_right))
+        else:
+            # placeholder to keep alignment
+            contents.append({"type": "box", "layout": "vertical", "contents": []})
+        # make 2-column grid
+        contents[0]["flex"] = 1
+        contents[1]["flex"] = 1
+        return {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": contents}
+
+    # Footer actions (keep your existing links)
+    footer_contents: list[dict] = []
     if dash_login_url:
         footer_contents.append(
             {
@@ -1546,6 +1576,16 @@ def build_help_flex(base_url: str, dash_login_url: str | None = None) -> dict:
         }
     )
 
+    # Quick command buttons (what you asked for)
+    quick_btn_rows = [
+        _row(_msg_btn("天氣", "天氣", style="primary"), _msg_btn("天氣門檻", "天氣門檻")),
+        _row(_msg_btn("吃藥狀態", "吃藥狀態", style="primary"), _msg_btn("我吃了", "我吃了")),
+        _row(_msg_btn("吃藥紀錄", "吃藥紀錄 14"), _msg_btn("取消吃藥", "取消吃藥")),
+        _row(_msg_btn("Duolingo狀態", "Duolingo狀態", style="primary"), _msg_btn("Duolingo已玩", "Duolingo已玩")),
+        _row(_msg_btn("Duo提醒開", "Duolingo提醒開"), _msg_btn("Duo提醒關", "Duolingo提醒關")),
+        _row(_msg_btn("攝影任務", "攝影任務", style="primary"), _msg_btn("任務狀態", "任務狀態")),
+    ]
+
     return {
         "type": "bubble",
         "body": {
@@ -1554,17 +1594,20 @@ def build_help_flex(base_url: str, dash_login_url: str | None = None) -> dict:
             "spacing": "md",
             "contents": [
                 {"type": "text", "text": f"{BOT_NAME} 使用說明", "weight": "bold", "size": "xl"},
-                {"type": "text", "text": "LINE 內排版/字數有限，我把完整版做成網站。", "wrap": True, "size": "sm", "color": "#666666"},
+                {
+                    "type": "text",
+                    "text": "點按鈕就會送出指令（等同你手打）。完整版排版在網站。",
+                    "wrap": True,
+                    "size": "sm",
+                    "color": "#666666",
+                },
                 {
                     "type": "box",
                     "layout": "vertical",
                     "spacing": "sm",
                     "contents": [
-                        {"type": "text", "text": "快速指令", "size": "sm", "weight": "bold"},
-                        {"type": "text", "text": "• 吃藥狀態 / 吃藥紀錄 14", "wrap": True, "size": "sm"},
-                        {"type": "text", "text": "• Duolingo已玩 / Duolingo狀態", "wrap": True, "size": "sm"},
-                        {"type": "text", "text": "• 攝影任務 / 任務狀態", "wrap": True, "size": "sm"},
-                        {"type": "text", "text": "• 儀表板（顯示紀念日/吃藥紀錄等）", "wrap": True, "size": "sm"},
+                        {"type": "text", "text": "常用功能按鈕", "size": "sm", "weight": "bold"},
+                        *quick_btn_rows,
                     ],
                 },
             ],
@@ -1576,6 +1619,7 @@ def build_help_flex(base_url: str, dash_login_url: str | None = None) -> dict:
             "contents": footer_contents,
         },
     }
+
 
 
 
