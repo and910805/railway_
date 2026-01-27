@@ -196,7 +196,7 @@ DOC_TEMPLATE = """<!doctype html>
         {% endif %}
 
         <div class="mt-4 space-y-3">
-          {% for it in s.items %}
+          {% for it in s.get('items', []) %}
             <div class="rounded-xl border border-slate-200 p-4">
               <div class="flex items-center justify-between gap-3">
                 <code class="text-sm font-semibold text-slate-900 break-all">{{ it.cmd }}</code>
