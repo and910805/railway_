@@ -55,6 +55,7 @@ from db_love import (
     list_photo_tasks,
     list_task_media_items,
     list_media_records,
+    list_media_records_with_task,
     claim_latest_open_task_for_role,
     # media
     save_media_record,
