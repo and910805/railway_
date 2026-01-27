@@ -17,6 +17,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from db_love import (
     ensure_med_pill_row,
     get_med_pill_row,
+    list_med_pill_rows_between,
     set_med_pill_taken,
     mark_med_pill_reminded,
     seed_defaults,
@@ -93,6 +94,13 @@ MED_PILL_ENABLED = os.getenv("MED_PILL_ENABLED", "0") == "1"
 MED_PILL_REMIND_TIME = os.getenv("MED_PILL_REMIND_TIME", "21:30")          # HH:MM
 MED_PILL_NUDGE_MINUTES = int(os.getenv("MED_PILL_NUDGE_MINUTES", "30"))    # every 30 min if no reply
 MED_PILL_QUIET_HOURS = os.getenv("MED_PILL_QUIET_HOURS", "00:00-07:00")    # set "" to disable
+
+
+# Duolingo streak reminder (多零果)
+DUO_REMIND_ENABLED = os.getenv("DUO_REMIND_ENABLED", "1") == "1"
+DUO_REMIND_EVERY_MINUTES = int(os.getenv("DUO_REMIND_EVERY_MINUTES", "10"))
+DUO_REMIND_START_HOUR = int(os.getenv("DUO_REMIND_START_HOUR", "22"))   # 22 = 10pm
+DUO_REMIND_END_HOUR = int(os.getenv("DUO_REMIND_END_HOUR", "23"))       # 23 = 11pm
 
 # Photo task expiry minutes (for auto "交作業" matching)
 PHOTO_TASK_EXPIRE_MIN = int(os.getenv("PHOTO_TASK_EXPIRE_MIN", "180"))
@@ -271,6 +279,30 @@ def _in_quiet_hours(now: datetime.datetime) -> bool:
         # crosses midnight
         return now >= start or now <= end
     return start <= now <= end
+
+# ===== Duolingo (多零果) reminder helpers =====
+def _get_bool_setting_global(key: str, default: bool) -> bool:
+    try:
+        v = get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=key)
+    except Exception:
+        v = None
+    if v is None:
+        return default
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
+
+def duo_remind_enabled() -> bool:
+    # settings override env default
+    return _get_bool_setting_global("duo_remind_enabled", DUO_REMIND_ENABLED)
+
+def duo_done_today(now: datetime.datetime) -> bool:
+    try:
+        d = get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day")
+    except Exception:
+        d = None
+    return (d or "").strip() == now.date().isoformat()
+
+
 
 def _is_pill_confirm_text(text: str) -> bool:
     t = (text or "").strip()
@@ -853,13 +885,25 @@ def help_text() -> str:
         "  取消吃藥 / 重置吃藥\n"
         "    - 取消今天的「已吃藥」紀錄（誤傳可用）\n"
         "\n"
+        "  吃藥紀錄 <天數>\n"
+        "    - 列出最近 N 天的吃藥時間（最多 30 天；例：吃藥紀錄 14）\n"
+        "\n"
         "  （自動功能）\n"
         "    - 每天固定時間提醒吃藥\n"
         "    - 未回覆會定期再次提醒\n"
         "    - 回覆「吃了 / 吃完 21:30」會自動記錄並通知另一方\n"
         "\n"
         "━━━━━━━━━━━━━━━━\n"
-        "三、對話橋樑（代傳訊息）\n"
+        "三、多零果提醒\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "  多零果提醒開 / 多零果提醒關\n"
+        "    - 每晚 22:00 起每 10 分鐘提醒一次\n"
+        "\n"
+        "  多零果已玩\n"
+        "    - 暫停今天提醒（明天 22:00 會再開始）\n"
+        "\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "四、對話橋樑（代傳訊息）\n"
         "━━━━━━━━━━━━━━━━\n"
         "  對話狀態\n"
         "    - 查看目前是否開啟橋樑模式\n"
@@ -974,6 +1018,8 @@ def _cmd(text: str) -> tuple[str, str]:
         "天氣提醒",
         "跟臭寶說",
         "跟臭晡晡說",
+        "吃藥紀錄",
+        "吃藥記錄",
     ]
     for c in cmds_with_arg:
         if t.startswith(c) and len(t) > len(c):
@@ -1128,6 +1174,74 @@ def handle_command(user_id: str, text: str) -> str:
             line_push_text(other_id, f"已撤銷今天的吃藥回報紀錄（{day}）。")
 
         return f"已撤銷 {DEFAULT_GIRLFRIEND_NICKNAME} 今天的吃藥回報紀錄（{day}）。"
+
+
+    # ===== medication: pill history (max 30 days) =====
+    if cmd in ("吃藥紀錄", "吃藥記錄", "藥紀錄", "藥記錄"):
+        rm = get_role_map_active(db_path=LOVE_DB_PATH)
+        gf_id = rm.get("girlfriend")
+        if not gf_id:
+            return "目前沒有設定 girlfriend/boyfriend 角色，先用「我是臭寶 / 我是臭晡晡」設好。"
+
+        days = 30
+        if arg:
+            mm = re.search(r"(\d{1,3})", arg)
+            if mm:
+                days = int(mm.group(1))
+        days = max(1, min(30, days))
+
+        now = _tz_now()
+        end_day = now.date()
+        start_day = end_day - datetime.timedelta(days=days - 1)
+
+        rows = list_med_pill_rows_between(
+            db_path=LOVE_DB_PATH,
+            user_id=gf_id,
+            start_day=start_day.isoformat(),
+            end_day=end_day.isoformat(),
+        )
+        by_day = {r.get("day"): r for r in rows if r.get("day")}
+
+        lines = [f"📋 {DEFAULT_GIRLFRIEND_NICKNAME} 事前藥紀錄（最近 {days} 天）"]
+        for i in range(days):
+            d = end_day - datetime.timedelta(days=i)
+            ds = d.isoformat()
+            r = by_day.get(ds)
+            if r and r.get("taken_at"):
+                label = r.get("taken_time_text") or "已記錄"
+                lines.append(f"{ds} ✅ {label}")
+            else:
+                rc = int(r.get("remind_count") or 0) if r else 0
+                if rc:
+                    lines.append(f"{ds} ❌ 未回報（提醒 {rc} 次）")
+                else:
+                    lines.append(f"{ds} ❌ 未回報")
+        return "\n".join(lines)
+
+    # ===== Duolingo (多零果) reminder commands =====
+    if cmd in ("多零果已玩", "已玩多零果", "多零果完成"):
+        today = _tz_now().date().isoformat()
+        set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day", value=today)
+        return "👌 收到～今天就不再提醒多零果了（明天 22:00 會再開始）。"
+
+    if cmd in ("多零果提醒開", "開多零果提醒", "多零果開"):
+        set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_remind_enabled", value="1")
+        set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day", value="")
+        return "✅ 已開啟多零果提醒（每天 22:00 起每 10 分鐘提醒一次）。"
+
+    if cmd in ("多零果提醒關", "關多零果提醒", "多零果關"):
+        set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_remind_enabled", value="0")
+        return "✅ 已關閉多零果提醒。"
+
+    if cmd in ("多零果狀態", "多零果設定"):
+        enabled = duo_remind_enabled()
+        today = _tz_now().date().isoformat()
+        done = (get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day") or "").strip()
+        return (
+            f"多零果提醒：{'開' if enabled else '關'}\n"
+            f"今日已玩：{'是' if done == today else '否'}\n"
+            "（可用：多零果提醒開 / 多零果提醒關 / 多零果已玩）"
+        )
 
     # conversation bridge
     if cmd in ("對話狀態", "狀態", "臭寶有沒有在跟我對話", "她在嗎", "有在嗎"):
@@ -1643,6 +1757,28 @@ def scheduled_med_pill_nudge():
     print("[SCHED][MED] nudge pushed.", flush=True)
 
 
+
+
+def scheduled_duo_remind():
+    """
+    Duolingo (多零果) streak reminder.
+    Runs on cron; also gated by DB setting so you can enable/disable by command.
+    """
+    if not duo_remind_enabled():
+        return
+
+    now = _tz_now()
+    if duo_done_today(now):
+        return
+
+    msg = (
+        "🍀 多零果時間！\n"
+        "10 分鐘一次提醒：記得去玩一下，別斷連勝。\n"
+        "（回「多零果已玩」可暫停今天提醒）"
+    )
+    push_to_couple_text(msg, fallback_user_id=None)
+    print("[SCHED][DUO] reminder pushed.", flush=True)
+
 def start_scheduler():
     global _scheduler
     if _scheduler:
@@ -1670,6 +1806,25 @@ def start_scheduler():
             id="med_pill_nudge",
             replace_existing=True,
         )
+
+    
+    # duolingo reminder (多零果)
+    try:
+        every = max(1, min(59, int(DUO_REMIND_EVERY_MINUTES)))
+        sh = max(0, min(23, int(DUO_REMIND_START_HOUR)))
+        eh = max(0, min(23, int(DUO_REMIND_END_HOUR)))
+        if eh < sh:
+            eh = sh
+        sched.add_job(
+            scheduled_duo_remind,
+            "cron",
+            hour=f"{sh}-{eh}",
+            minute=f"*/{every}",
+            id="duo_remind",
+            replace_existing=True,
+        )
+    except Exception as e:
+        print("[SCHED][DUO] add_job error:", e, flush=True)
 
     sched.start()
     _scheduler = sched

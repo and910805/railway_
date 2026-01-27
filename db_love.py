@@ -312,6 +312,33 @@ def get_med_pill_row(db_path: str, user_id: str, day: str | None = None) -> Opti
     finally:
         conn.close()
 
+
+def list_med_pill_rows_between(
+    db_path: str,
+    user_id: str,
+    start_day: str,
+    end_day: str,
+) -> list[dict]:
+    """
+    Return rows in [start_day, end_day] (inclusive) for the given user_id.
+    day format: YYYY-MM-DD
+    """
+    conn = _conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM med_pills
+            WHERE user_id=? AND day>=? AND day<=?
+            ORDER BY day DESC
+            """,
+            (user_id, start_day, end_day),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def set_med_pill_taken(
     db_path: str,
     user_id: str,
