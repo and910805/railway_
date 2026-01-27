@@ -4,6 +4,7 @@ import hmac
 import base64
 import hashlib
 import datetime
+import time
 import mimetypes
 from pathlib import Path
 from typing import Optional
@@ -260,7 +261,7 @@ MED_PILL_NUDGE_MINUTES = int(os.getenv("MED_PILL_NUDGE_MINUTES", "30"))    # eve
 MED_PILL_QUIET_HOURS = os.getenv("MED_PILL_QUIET_HOURS", "00:00-07:00")    # set "" to disable
 
 
-# Duolingo streak reminder (Duolingo)
+# Duolingo streak reminder
 DUO_REMIND_ENABLED = os.getenv("DUO_REMIND_ENABLED", "1") == "1"
 DUO_REMIND_EVERY_MINUTES = int(os.getenv("DUO_REMIND_EVERY_MINUTES", "10"))
 DUO_REMIND_START_HOUR = int(os.getenv("DUO_REMIND_START_HOUR", "22"))   # 22 = 10pm
@@ -444,7 +445,7 @@ def _in_quiet_hours(now: datetime.datetime) -> bool:
         return now >= start or now <= end
     return start <= now <= end
 
-# ===== Duolingo (Duolingo) reminder helpers =====
+# ===== Duolingo reminder helpers =====
 def _get_bool_setting_global(key: str, default: bool) -> bool:
     try:
         v = get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=key)
@@ -1063,7 +1064,7 @@ def help_text() -> str:
         "    - 回覆「吃了 / 吃完 21:30」會自動記錄並通知另一方\n"
         "\n"
         "━━━━━━━━━━━━━━━━\n"
-        "三、Duolingo提醒\n"
+        "三、Duolingo 提醒\n"
         "━━━━━━━━━━━━━━━━\n"
         "  Duolingo提醒開 / Duolingo提醒關\n"
         "    - 每晚 22:00 起每 10 分鐘提醒一次\n"
@@ -1238,6 +1239,32 @@ def build_help_flex(base_url: str, dash_login_url: str | None = None) -> dict:
     }
 
 
+
+
+def build_dashboard_login_flex(base_url: str, login_url: str) -> dict:
+    """A simple Flex card that opens the dashboard via one-time magic link."""
+    return {
+        "type": "bubble",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
+            "contents": [
+                {"type": "text", "text": f"{BOT_NAME}｜私人儀表板", "weight": "bold", "size": "xl"},
+                {"type": "text", "text": "這是一個一次性/短效登入連結，點開即可登入（網址不需要手打 token）。", "wrap": True, "size": "sm", "color": "#666666"},
+            ],
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+                {"type": "button", "style": "primary", "action": {"type": "uri", "label": "開啟儀表板", "uri": login_url}},
+                {"type": "button", "style": "secondary", "action": {"type": "uri", "label": "使用說明", "uri": f"{base_url}/docs"}},
+            ],
+        },
+    }
+
 def _cmd(text: str) -> tuple[str, str]:
     """
     支援：
@@ -1361,20 +1388,41 @@ def handle_command(user_id: str, text: str) -> str:
         print("[MED] pill confirm error:", e, flush=True)
 
     cmd, arg = _cmd(text)
+    cmd_l = (cmd or "").strip().lower()
 
     if cmd in ("help", "說明", "幫助"):
         base_url = get_public_base_url()
+        dash_login_url = None
+        try:
+            if _dash_user_allowed(user_id):
+                dash_login_url = _dash_make_login_url(user_id)
+        except Exception:
+            dash_login_url = None
         return [
             {
                 "type": "flex",
                 "altText": f"{BOT_NAME} 使用說明",
-                "contents": build_help_flex(base_url),
+                "contents": build_help_flex(base_url, dash_login_url=dash_login_url),
             }
         ]
 
     if cmd in ("help2", "指令", "常用指令"):
         base_url = get_public_base_url()
         return help_quick_text(base_url)
+
+    if cmd in ("儀表板", "面板") or cmd_l in ("dashboard", "dash"):
+        base_url = get_public_base_url()
+        if not _dash_user_allowed(user_id):
+            return "🔒 儀表板是私人資料。請先在 LINE 設定角色：我是臭寶 / 我是臭晡晡（且兩人都加入推播）。"
+        login_url = _dash_make_login_url(user_id)
+        return [
+            {
+                "type": "flex",
+                "altText": f"{BOT_NAME} 儀表板",
+                "contents": build_dashboard_login_flex(base_url, login_url),
+            }
+        ]
+
 
     # identity / push
     if cmd == "我是臭寶":
@@ -1474,27 +1522,27 @@ def handle_command(user_id: str, text: str) -> str:
                     lines.append(f"{ds} ❌ 未回報")
         return "\n".join(lines)
 
-    # ===== Duolingo (Duolingo) reminder commands =====
-    if cmd in ("Duolingo已玩", "已玩Duolingo", "Duolingo完成"):
+    # ===== Duolingo reminder commands =====
+    if cmd_l in ("duolingo已玩", "已玩duolingo", "duolingo完成", "多零果已玩", "已玩多零果", "多零果完成"):
         today = _tz_now().date().isoformat()
         set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day", value=today)
-        return "👌 收到～今天就不再提醒Duolingo了（明天 22:00 會再開始）。"
+        return "👌 收到～今天就不再提醒 Duolingo 了（明天 22:00 會再開始）。"
 
-    if cmd in ("Duolingo提醒開", "開Duolingo提醒", "Duolingo開"):
+    if cmd_l in ("duolingo提醒開", "開duolingo提醒", "duolingo開", "多零果提醒開", "開多零果提醒", "多零果開"):
         set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_remind_enabled", value="1")
         set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day", value="")
-        return "✅ 已開啟Duolingo提醒（每天 22:00 起每 10 分鐘提醒一次）。"
+        return "✅ 已開啟 Duolingo 提醒（每天 22:00 起每 10 分鐘提醒一次）。"
 
-    if cmd in ("Duolingo提醒關", "關Duolingo提醒", "Duolingo關"):
+    if cmd_l in ("duolingo提醒關", "關duolingo提醒", "duolingo關", "多零果提醒關", "關多零果提醒", "多零果關"):
         set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_remind_enabled", value="0")
-        return "✅ 已關閉Duolingo提醒。"
+        return "✅ 已關閉 Duolingo 提醒。"
 
-    if cmd in ("Duolingo狀態", "Duolingo設定"):
+    if cmd_l in ("duolingo狀態", "duolingo設定", "多零果狀態", "多零果設定"):
         enabled = duo_remind_enabled()
         today = _tz_now().date().isoformat()
         done = (get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day") or "").strip()
         return (
-            f"Duolingo提醒：{'開' if enabled else '關'}\n"
+            f"Duolingo 提醒：{'開' if enabled else '關'}\n"
             f"今日已玩：{'是' if done == today else '否'}\n"
             "（可用：Duolingo提醒開 / Duolingo提醒關 / Duolingo已玩）"
         )
@@ -2020,7 +2068,7 @@ def scheduled_med_pill_nudge():
 
 def scheduled_duo_remind():
     """
-    Duolingo (Duolingo) streak reminder.
+    Duolingo streak reminder.
     Runs on cron; also gated by DB setting so you can enable/disable by command.
     """
     if not duo_remind_enabled():
@@ -2031,7 +2079,7 @@ def scheduled_duo_remind():
         return
 
     msg = (
-        "🍀 Duolingo時間！\n"
+        "Duolingo 時間！\n"
         "10 分鐘一次提醒：記得去玩一下，別斷連勝。\n"
         "（回「Duolingo已玩」可暫停今天提醒）"
     )
@@ -2067,7 +2115,7 @@ def start_scheduler():
         )
 
     
-    # duolingo reminder (Duolingo)
+    # duolingo reminder
     try:
         every = max(1, min(59, int(DUO_REMIND_EVERY_MINUTES)))
         sh = max(0, min(23, int(DUO_REMIND_START_HOUR)))
@@ -2383,6 +2431,36 @@ DASH_LOGIN_FAIL_TEMPLATE = """<!doctype html>
 </body>
 </html>"""
 
+DASH_LOGIN_FORBIDDEN_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }} - 未授權</title>
+  <style>
+    body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans TC","Helvetica Neue",Arial; margin:0; background:#0b1020; color:#e6e8ef;}
+    .wrap{max-width:820px; margin:0 auto; padding:40px 18px;}
+    .card{background:#131a33; border:1px solid rgba(255,255,255,.08); border-radius:18px; padding:22px;}
+    h1{margin:0 0 10px 0; font-size:22px;}
+    p{margin:8px 0; color:#b8bfd8; line-height:1.6;}
+    .btn{display:inline-block; padding:10px 14px; border-radius:12px; text-decoration:none; background:#2f6bff; color:#fff; font-weight:700;}
+    code{background:rgba(255,255,255,.08); padding:2px 6px; border-radius:8px;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>⛔ 未授權</h1>
+      <p>這個儀表板只提供給已設定的 couple 成員（在 LINE 先設定 <code>我是臭寶</code> / <code>我是臭晡晡</code>，並加入推播）。</p>
+      <p style="margin-top:16px;">
+        <a class="btn" href="{{ docs_url }}">回到使用說明</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
 
 def _dashboard_session_valid() -> bool:
     try:
@@ -2391,6 +2469,24 @@ def _dashboard_session_valid() -> bool:
         exp = 0
     uid = (session.get("dash_uid") or "").strip()
     return bool(uid) and int(time.time()) < exp
+
+
+
+def _dash_allowed_user_ids() -> set[str]:
+    rm = get_role_map_active(db_path=LOVE_DB_PATH)
+    allowed = set()
+    for k in ("girlfriend", "boyfriend"):
+        uid = (rm.get(k) or "").strip()
+        if uid:
+            allowed.add(uid)
+    return allowed
+
+
+def _dash_user_allowed(user_id: str) -> bool:
+    user_id = (user_id or "").strip()
+    if not user_id:
+        return False
+    return user_id in _dash_allowed_user_ids()
 
 
 def _dash_make_login_url(for_user_id: str) -> str:
@@ -2576,6 +2672,40 @@ def _build_dashboard_data() -> dict:
         "warning": warning,
     }
 
+
+
+@app.route("/dash/login")
+def dash_login():
+    """Exchange a one-time magic token for a session cookie, then redirect to /dash."""
+    token = (request.args.get("t") or "").strip()
+    uid = consume_dashboard_magic_token(db_path=LOVE_DB_PATH, token=token)
+    if not uid:
+        return render_template_string(
+            DASH_LOGIN_FAIL_TEMPLATE,
+            bot_name=BOT_NAME,
+            docs_url=f"{get_public_base_url()}/docs",
+        ), 401
+
+    # hard gate: only active couple members can view the dashboard
+    if not _dash_user_allowed(uid):
+        return render_template_string(
+            DASH_LOGIN_FORBIDDEN_TEMPLATE,
+            bot_name=BOT_NAME,
+            docs_url=f"{get_public_base_url()}/docs",
+        ), 403
+
+    session["dash_uid"] = uid
+    session["dash_exp"] = int(time.time()) + DASH_SESSION_TTL_SECONDS
+    session["dash_at"] = int(time.time())
+    return redirect("/dash")
+
+
+@app.route("/dash/logout")
+def dash_logout():
+    session.pop("dash_uid", None)
+    session.pop("dash_exp", None)
+    session.pop("dash_at", None)
+    return redirect("/dash")
 
 @app.route("/dash")
 def dash():
