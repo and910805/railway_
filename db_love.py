@@ -127,6 +127,7 @@ def seed_defaults(db_path: str = DEFAULT_DB):
         )
         """
     )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_wishes_user_created ON wishes(user_id, created_at DESC);")
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS moods (
@@ -137,6 +138,7 @@ def seed_defaults(db_path: str = DEFAULT_DB):
         )
         """
     )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_moods_user_created ON moods(user_id, created_at DESC);")
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS settings (
@@ -616,6 +618,18 @@ def get_setting(db_path: str, user_id: str, key: str) -> Optional[str]:
     row = conn.execute("SELECT v FROM settings WHERE user_id=? AND k=?", (user_id, key)).fetchone()
     conn.close()
     return row["v"] if row else None
+
+def get_settings_map(db_path: str, user_id: str) -> dict[str, str]:
+    """Fetch all settings for a user in one query (faster than repeated get_setting calls)."""
+    conn = _conn(db_path)
+    rows = conn.execute("SELECT k, v FROM settings WHERE user_id=?", (user_id,)).fetchall()
+    conn.close()
+    out: dict[str, str] = {}
+    for r in rows:
+        out[str(r["k"])] = str(r["v"])
+    return out
+
+
 
 
 # ===== subscriber / roles =====

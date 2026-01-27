@@ -12,7 +12,7 @@ from typing import Optional
 import re
 
 import requests
-from flask import Flask, jsonify, request, send_file, abort, render_template_string, redirect, session
+from flask import Flask, jsonify, request, send_file, abort, render_template_string, redirect, session, g
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -39,6 +39,7 @@ from db_love import (
     list_moods,
     set_setting,
     get_setting,
+    get_settings_map,
     # subscribers/roles
     upsert_subscriber,
     set_role,
@@ -75,6 +76,25 @@ logging.basicConfig(
 logger = logging.getLogger("love-bot")
 
 app = Flask(__name__)
+
+# ====== Request timing (debug perf) ======
+@app.before_request
+def _timing_start():
+    try:
+        g._t0 = time.time()
+    except Exception:
+        pass
+
+@app.after_request
+def _timing_end(resp):
+    try:
+        t0 = getattr(g, '_t0', None)
+        if t0:
+            resp.headers['X-Server-Duration-ms'] = f"{(time.time()-t0)*1000:.1f}"
+    except Exception:
+        pass
+    return resp
+
 
 # ====== Env ======
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -184,7 +204,153 @@ DOC_TEMPLATE = """<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ bot_name }}｜使用說明</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+    :root{
+      --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-300:#cbd5e1;
+      --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155; --slate-800:#1f2937; --slate-900:#0f172a;
+      --emerald-50:#ecfdf5; --emerald-200:#a7f3d0; --emerald-700:#047857; --emerald-900:#064e3b;
+      --amber-50:#fffbeb; --amber-200:#fde68a; --amber-700:#b45309; --amber-800:#92400e; --amber-900:#78350f;
+      --rose-50:#fff1f2; --rose-200:#fecdd3; --rose-900:#881337;
+      --sky-50:#f0f9ff; --sky-700:#0369a1;
+      --shadow: 0 10px 30px rgba(15, 23, 42, .08);
+      --shadow-sm: 0 6px 18px rgba(15, 23, 42, .06);
+      --radius: 18px;
+    }
+    html,body{height:100%;}
+    body{
+      margin:0;
+      background:var(--slate-50);
+      color:var(--slate-900);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", "Helvetica Neue", Arial;
+    }
+    a{color:inherit;}
+    /* layout */
+    .wrap{max-width:1100px; margin:0 auto; padding:18px 16px 44px;}
+    .max-w-3xl{max-width:768px;}
+    .max-w-5xl{max-width:1024px;}
+    .max-w-6xl{max-width:1152px;}
+    .mx-auto{margin-left:auto; margin-right:auto;}
+    .ml-auto{margin-left:auto;}
+    .block{display:block;}
+    .w-full{width:100%;}
+    .min-w-full{min-width:100%;}
+    .overflow-hidden{overflow:hidden;}
+    .overflow-x-auto{overflow-x:auto;}
+    .break-all{word-break:break-all;}
+    .flex{display:flex;}
+    .inline-flex{display:inline-flex;}
+    .flex-col{flex-direction:column;}
+    .flex-wrap{flex-wrap:wrap;}
+    .items-center{align-items:center;}
+    .items-end{align-items:flex-end;}
+    .items-start{align-items:flex-start;}
+    .justify-between{justify-content:space-between;}
+    .grid{display:grid;}
+    .grid-cols-1{grid-template-columns:1fr;}
+    .gap-1{gap:4px;}
+    .gap-2{gap:8px;}
+    .gap-3{gap:12px;}
+    .gap-4{gap:16px;}
+    .space-y-2 > * + *{margin-top:8px;}
+    .space-y-3 > * + *{margin-top:12px;}
+    .space-y-6 > * + *{margin-top:24px;}
+    .divide-y > * + *{border-top:1px solid var(--slate-200);}
+    /* responsive (subset) */
+    @media (min-width:768px){
+      .md\:flex-row{flex-direction:row;}
+      .md\:items-end{align-items:flex-end;}
+      .md\:items-start{align-items:flex-start;}
+      .md\:justify-between{justify-content:space-between;}
+      .md\:grid-cols-2{grid-template-columns:repeat(2, minmax(0,1fr));}
+      .md\:col-span-2{grid-column:span 2 / span 2;}
+      .md\:mt-0{margin-top:0;}
+      .md\:text-3xl{font-size:30px;}
+    }
+    @media (min-width:1024px){
+      .lg\:grid-cols-3{grid-template-columns:repeat(3, minmax(0,1fr));}
+    }
+    /* spacing */
+    .p-3{padding:12px;}
+    .p-4{padding:16px;}
+    .p-5{padding:20px;}
+    .p-6{padding:24px;}
+    .px-2{padding-left:8px; padding-right:8px;}
+    .px-3{padding-left:12px; padding-right:12px;}
+    .px-4{padding-left:16px; padding-right:16px;}
+    .px-5{padding-left:20px; padding-right:20px;}
+    .py-1{padding-top:4px; padding-bottom:4px;}
+    .py-2{padding-top:8px; padding-bottom:8px;}
+    .py-10{padding-top:40px; padding-bottom:40px;}
+    .mt-1{margin-top:4px;}
+    .mt-2{margin-top:8px;}
+    .mt-3{margin-top:12px;}
+    .mt-4{margin-top:16px;}
+    .mt-5{margin-top:20px;}
+    .mt-6{margin-top:24px;}
+    .mt-8{margin-top:32px;}
+    .mt-10{margin-top:40px;}
+    .pr-4{padding-right:16px;}
+    /* typography */
+    .font-bold{font-weight:800;}
+    .font-semibold{font-weight:700;}
+    .font-mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+    .tracking-tight{letter-spacing:-0.02em;}
+    .text-left{text-align:left;}
+    .text-xs{font-size:12px;}
+    .text-sm{font-size:13px;}
+    .text-lg{font-size:18px;}
+    .text-xl{font-size:20px;}
+    .text-2xl{font-size:26px;}
+    .text-3xl{font-size:30px;}
+    .text-white{color:#fff;}
+    .text-slate-500{color:var(--slate-500);}
+    .text-slate-600{color:var(--slate-600);}
+    .text-slate-700{color:var(--slate-700);}
+    .text-slate-800{color:var(--slate-800);}
+    .text-slate-900{color:var(--slate-900);}
+    .text-emerald-700{color:var(--emerald-700);}
+    .text-emerald-900{color:var(--emerald-900);}
+    .text-amber-700{color:var(--amber-700);}
+    .text-amber-800{color:var(--amber-800);}
+    .text-amber-900{color:var(--amber-900);}
+    .text-rose-900{color:var(--rose-900);}
+    .text-sky-700{color:var(--sky-700);}
+    .underline{text-decoration:underline;}
+    /* surfaces */
+    .bg-white{background:#fff;}
+    .bg-slate-50{background:var(--slate-50);}
+    .bg-slate-100{background:var(--slate-100);}
+    .bg-slate-900{background:var(--slate-900);}
+    .bg-emerald-50{background:var(--emerald-50);}
+    .bg-amber-50{background:var(--amber-50);}
+    .bg-rose-50{background:var(--rose-50);}
+    .bg-sky-50{background:var(--sky-50);}
+    .border{border-width:1px; border-style:solid;}
+    .border-slate-200{border-color:var(--slate-200);}
+    .border-slate-300{border-color:var(--slate-300);}
+    .border-emerald-200{border-color:var(--emerald-200);}
+    .border-amber-200{border-color:var(--amber-200);}
+    .border-rose-200{border-color:var(--rose-200);}
+    .rounded{border-radius:10px;}
+    .rounded-lg{border-radius:12px;}
+    .rounded-xl{border-radius:16px;}
+    .rounded-2xl{border-radius:20px;}
+    .rounded-full{border-radius:999px;}
+    .shadow{box-shadow:var(--shadow);}
+    .shadow-sm{box-shadow:var(--shadow-sm);}
+    .h-auto{height:auto;}
+    /* hover (subset) */
+    .hover\:bg-slate-50:hover{background:var(--slate-50);}
+    .hover\:text-slate-800:hover{color:var(--slate-800);}
+    /* buttons (for login templates) */
+    .btn{display:inline-block; padding:10px 14px; border-radius:14px; text-decoration:none; background:#2f6bff; color:#fff; font-weight:800;}
+    .card{background:#fff; border:1px solid var(--slate-200); border-radius:18px; padding:16px; box-shadow:var(--shadow-sm);}
+    /* Gallery helpers */
+    .masonry { column-gap: 1rem; column-count: 2; }
+    @media (min-width: 768px) { .masonry { column-count: 3; } }
+    @media (min-width: 1024px) { .masonry { column-count: 4; } }
+    .masonry-item { break-inside: avoid; margin-bottom: 1rem; }
+  </style>
 </head>
 <body class="bg-slate-50 text-slate-900">
   <div class="mx-auto max-w-3xl px-4 py-10">
@@ -439,9 +605,26 @@ def _parse_hhmm(s: str, default=(21, 30)) -> tuple[int, int]:
     return default
 
 # ===== global (DB) settings helpers =====
+def _global_settings_map() -> dict:
+    """Request-scoped cache of global settings to avoid opening SQLite connections repeatedly."""
+    try:
+        cached = getattr(g, "_global_settings_map", None)
+    except Exception:
+        cached = None
+    if cached is None:
+        try:
+            cached = get_settings_map(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID) or {}
+        except Exception:
+            cached = {}
+        try:
+            g._global_settings_map = cached
+        except Exception:
+            pass
+    return cached
+
 def _get_setting_global(key: str) -> str | None:
     try:
-        return get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=key)
+        return _global_settings_map().get(key)
     except Exception:
         return None
 
@@ -2398,7 +2581,153 @@ DASH_TEMPLATE = """<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ bot_name }}｜儀表板</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+    :root{
+      --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-300:#cbd5e1;
+      --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155; --slate-800:#1f2937; --slate-900:#0f172a;
+      --emerald-50:#ecfdf5; --emerald-200:#a7f3d0; --emerald-700:#047857; --emerald-900:#064e3b;
+      --amber-50:#fffbeb; --amber-200:#fde68a; --amber-700:#b45309; --amber-800:#92400e; --amber-900:#78350f;
+      --rose-50:#fff1f2; --rose-200:#fecdd3; --rose-900:#881337;
+      --sky-50:#f0f9ff; --sky-700:#0369a1;
+      --shadow: 0 10px 30px rgba(15, 23, 42, .08);
+      --shadow-sm: 0 6px 18px rgba(15, 23, 42, .06);
+      --radius: 18px;
+    }
+    html,body{height:100%;}
+    body{
+      margin:0;
+      background:var(--slate-50);
+      color:var(--slate-900);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", "Helvetica Neue", Arial;
+    }
+    a{color:inherit;}
+    /* layout */
+    .wrap{max-width:1100px; margin:0 auto; padding:18px 16px 44px;}
+    .max-w-3xl{max-width:768px;}
+    .max-w-5xl{max-width:1024px;}
+    .max-w-6xl{max-width:1152px;}
+    .mx-auto{margin-left:auto; margin-right:auto;}
+    .ml-auto{margin-left:auto;}
+    .block{display:block;}
+    .w-full{width:100%;}
+    .min-w-full{min-width:100%;}
+    .overflow-hidden{overflow:hidden;}
+    .overflow-x-auto{overflow-x:auto;}
+    .break-all{word-break:break-all;}
+    .flex{display:flex;}
+    .inline-flex{display:inline-flex;}
+    .flex-col{flex-direction:column;}
+    .flex-wrap{flex-wrap:wrap;}
+    .items-center{align-items:center;}
+    .items-end{align-items:flex-end;}
+    .items-start{align-items:flex-start;}
+    .justify-between{justify-content:space-between;}
+    .grid{display:grid;}
+    .grid-cols-1{grid-template-columns:1fr;}
+    .gap-1{gap:4px;}
+    .gap-2{gap:8px;}
+    .gap-3{gap:12px;}
+    .gap-4{gap:16px;}
+    .space-y-2 > * + *{margin-top:8px;}
+    .space-y-3 > * + *{margin-top:12px;}
+    .space-y-6 > * + *{margin-top:24px;}
+    .divide-y > * + *{border-top:1px solid var(--slate-200);}
+    /* responsive (subset) */
+    @media (min-width:768px){
+      .md\:flex-row{flex-direction:row;}
+      .md\:items-end{align-items:flex-end;}
+      .md\:items-start{align-items:flex-start;}
+      .md\:justify-between{justify-content:space-between;}
+      .md\:grid-cols-2{grid-template-columns:repeat(2, minmax(0,1fr));}
+      .md\:col-span-2{grid-column:span 2 / span 2;}
+      .md\:mt-0{margin-top:0;}
+      .md\:text-3xl{font-size:30px;}
+    }
+    @media (min-width:1024px){
+      .lg\:grid-cols-3{grid-template-columns:repeat(3, minmax(0,1fr));}
+    }
+    /* spacing */
+    .p-3{padding:12px;}
+    .p-4{padding:16px;}
+    .p-5{padding:20px;}
+    .p-6{padding:24px;}
+    .px-2{padding-left:8px; padding-right:8px;}
+    .px-3{padding-left:12px; padding-right:12px;}
+    .px-4{padding-left:16px; padding-right:16px;}
+    .px-5{padding-left:20px; padding-right:20px;}
+    .py-1{padding-top:4px; padding-bottom:4px;}
+    .py-2{padding-top:8px; padding-bottom:8px;}
+    .py-10{padding-top:40px; padding-bottom:40px;}
+    .mt-1{margin-top:4px;}
+    .mt-2{margin-top:8px;}
+    .mt-3{margin-top:12px;}
+    .mt-4{margin-top:16px;}
+    .mt-5{margin-top:20px;}
+    .mt-6{margin-top:24px;}
+    .mt-8{margin-top:32px;}
+    .mt-10{margin-top:40px;}
+    .pr-4{padding-right:16px;}
+    /* typography */
+    .font-bold{font-weight:800;}
+    .font-semibold{font-weight:700;}
+    .font-mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+    .tracking-tight{letter-spacing:-0.02em;}
+    .text-left{text-align:left;}
+    .text-xs{font-size:12px;}
+    .text-sm{font-size:13px;}
+    .text-lg{font-size:18px;}
+    .text-xl{font-size:20px;}
+    .text-2xl{font-size:26px;}
+    .text-3xl{font-size:30px;}
+    .text-white{color:#fff;}
+    .text-slate-500{color:var(--slate-500);}
+    .text-slate-600{color:var(--slate-600);}
+    .text-slate-700{color:var(--slate-700);}
+    .text-slate-800{color:var(--slate-800);}
+    .text-slate-900{color:var(--slate-900);}
+    .text-emerald-700{color:var(--emerald-700);}
+    .text-emerald-900{color:var(--emerald-900);}
+    .text-amber-700{color:var(--amber-700);}
+    .text-amber-800{color:var(--amber-800);}
+    .text-amber-900{color:var(--amber-900);}
+    .text-rose-900{color:var(--rose-900);}
+    .text-sky-700{color:var(--sky-700);}
+    .underline{text-decoration:underline;}
+    /* surfaces */
+    .bg-white{background:#fff;}
+    .bg-slate-50{background:var(--slate-50);}
+    .bg-slate-100{background:var(--slate-100);}
+    .bg-slate-900{background:var(--slate-900);}
+    .bg-emerald-50{background:var(--emerald-50);}
+    .bg-amber-50{background:var(--amber-50);}
+    .bg-rose-50{background:var(--rose-50);}
+    .bg-sky-50{background:var(--sky-50);}
+    .border{border-width:1px; border-style:solid;}
+    .border-slate-200{border-color:var(--slate-200);}
+    .border-slate-300{border-color:var(--slate-300);}
+    .border-emerald-200{border-color:var(--emerald-200);}
+    .border-amber-200{border-color:var(--amber-200);}
+    .border-rose-200{border-color:var(--rose-200);}
+    .rounded{border-radius:10px;}
+    .rounded-lg{border-radius:12px;}
+    .rounded-xl{border-radius:16px;}
+    .rounded-2xl{border-radius:20px;}
+    .rounded-full{border-radius:999px;}
+    .shadow{box-shadow:var(--shadow);}
+    .shadow-sm{box-shadow:var(--shadow-sm);}
+    .h-auto{height:auto;}
+    /* hover (subset) */
+    .hover\:bg-slate-50:hover{background:var(--slate-50);}
+    .hover\:text-slate-800:hover{color:var(--slate-800);}
+    /* buttons (for login templates) */
+    .btn{display:inline-block; padding:10px 14px; border-radius:14px; text-decoration:none; background:#2f6bff; color:#fff; font-weight:800;}
+    .card{background:#fff; border:1px solid var(--slate-200); border-radius:18px; padding:16px; box-shadow:var(--shadow-sm);}
+    /* Gallery helpers */
+    .masonry { column-gap: 1rem; column-count: 2; }
+    @media (min-width: 768px) { .masonry { column-count: 3; } }
+    @media (min-width: 1024px) { .masonry { column-count: 4; } }
+    .masonry-item { break-inside: avoid; margin-bottom: 1rem; }
+  </style>
 </head>
 <body class="bg-slate-50 text-slate-900">
   <div class="max-w-5xl mx-auto px-4 py-10">
@@ -2564,7 +2893,153 @@ DASH_TASKS_TEMPLATE = """<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ bot_name }}｜任務牆</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+    :root{
+      --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-300:#cbd5e1;
+      --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155; --slate-800:#1f2937; --slate-900:#0f172a;
+      --emerald-50:#ecfdf5; --emerald-200:#a7f3d0; --emerald-700:#047857; --emerald-900:#064e3b;
+      --amber-50:#fffbeb; --amber-200:#fde68a; --amber-700:#b45309; --amber-800:#92400e; --amber-900:#78350f;
+      --rose-50:#fff1f2; --rose-200:#fecdd3; --rose-900:#881337;
+      --sky-50:#f0f9ff; --sky-700:#0369a1;
+      --shadow: 0 10px 30px rgba(15, 23, 42, .08);
+      --shadow-sm: 0 6px 18px rgba(15, 23, 42, .06);
+      --radius: 18px;
+    }
+    html,body{height:100%;}
+    body{
+      margin:0;
+      background:var(--slate-50);
+      color:var(--slate-900);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", "Helvetica Neue", Arial;
+    }
+    a{color:inherit;}
+    /* layout */
+    .wrap{max-width:1100px; margin:0 auto; padding:18px 16px 44px;}
+    .max-w-3xl{max-width:768px;}
+    .max-w-5xl{max-width:1024px;}
+    .max-w-6xl{max-width:1152px;}
+    .mx-auto{margin-left:auto; margin-right:auto;}
+    .ml-auto{margin-left:auto;}
+    .block{display:block;}
+    .w-full{width:100%;}
+    .min-w-full{min-width:100%;}
+    .overflow-hidden{overflow:hidden;}
+    .overflow-x-auto{overflow-x:auto;}
+    .break-all{word-break:break-all;}
+    .flex{display:flex;}
+    .inline-flex{display:inline-flex;}
+    .flex-col{flex-direction:column;}
+    .flex-wrap{flex-wrap:wrap;}
+    .items-center{align-items:center;}
+    .items-end{align-items:flex-end;}
+    .items-start{align-items:flex-start;}
+    .justify-between{justify-content:space-between;}
+    .grid{display:grid;}
+    .grid-cols-1{grid-template-columns:1fr;}
+    .gap-1{gap:4px;}
+    .gap-2{gap:8px;}
+    .gap-3{gap:12px;}
+    .gap-4{gap:16px;}
+    .space-y-2 > * + *{margin-top:8px;}
+    .space-y-3 > * + *{margin-top:12px;}
+    .space-y-6 > * + *{margin-top:24px;}
+    .divide-y > * + *{border-top:1px solid var(--slate-200);}
+    /* responsive (subset) */
+    @media (min-width:768px){
+      .md\:flex-row{flex-direction:row;}
+      .md\:items-end{align-items:flex-end;}
+      .md\:items-start{align-items:flex-start;}
+      .md\:justify-between{justify-content:space-between;}
+      .md\:grid-cols-2{grid-template-columns:repeat(2, minmax(0,1fr));}
+      .md\:col-span-2{grid-column:span 2 / span 2;}
+      .md\:mt-0{margin-top:0;}
+      .md\:text-3xl{font-size:30px;}
+    }
+    @media (min-width:1024px){
+      .lg\:grid-cols-3{grid-template-columns:repeat(3, minmax(0,1fr));}
+    }
+    /* spacing */
+    .p-3{padding:12px;}
+    .p-4{padding:16px;}
+    .p-5{padding:20px;}
+    .p-6{padding:24px;}
+    .px-2{padding-left:8px; padding-right:8px;}
+    .px-3{padding-left:12px; padding-right:12px;}
+    .px-4{padding-left:16px; padding-right:16px;}
+    .px-5{padding-left:20px; padding-right:20px;}
+    .py-1{padding-top:4px; padding-bottom:4px;}
+    .py-2{padding-top:8px; padding-bottom:8px;}
+    .py-10{padding-top:40px; padding-bottom:40px;}
+    .mt-1{margin-top:4px;}
+    .mt-2{margin-top:8px;}
+    .mt-3{margin-top:12px;}
+    .mt-4{margin-top:16px;}
+    .mt-5{margin-top:20px;}
+    .mt-6{margin-top:24px;}
+    .mt-8{margin-top:32px;}
+    .mt-10{margin-top:40px;}
+    .pr-4{padding-right:16px;}
+    /* typography */
+    .font-bold{font-weight:800;}
+    .font-semibold{font-weight:700;}
+    .font-mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+    .tracking-tight{letter-spacing:-0.02em;}
+    .text-left{text-align:left;}
+    .text-xs{font-size:12px;}
+    .text-sm{font-size:13px;}
+    .text-lg{font-size:18px;}
+    .text-xl{font-size:20px;}
+    .text-2xl{font-size:26px;}
+    .text-3xl{font-size:30px;}
+    .text-white{color:#fff;}
+    .text-slate-500{color:var(--slate-500);}
+    .text-slate-600{color:var(--slate-600);}
+    .text-slate-700{color:var(--slate-700);}
+    .text-slate-800{color:var(--slate-800);}
+    .text-slate-900{color:var(--slate-900);}
+    .text-emerald-700{color:var(--emerald-700);}
+    .text-emerald-900{color:var(--emerald-900);}
+    .text-amber-700{color:var(--amber-700);}
+    .text-amber-800{color:var(--amber-800);}
+    .text-amber-900{color:var(--amber-900);}
+    .text-rose-900{color:var(--rose-900);}
+    .text-sky-700{color:var(--sky-700);}
+    .underline{text-decoration:underline;}
+    /* surfaces */
+    .bg-white{background:#fff;}
+    .bg-slate-50{background:var(--slate-50);}
+    .bg-slate-100{background:var(--slate-100);}
+    .bg-slate-900{background:var(--slate-900);}
+    .bg-emerald-50{background:var(--emerald-50);}
+    .bg-amber-50{background:var(--amber-50);}
+    .bg-rose-50{background:var(--rose-50);}
+    .bg-sky-50{background:var(--sky-50);}
+    .border{border-width:1px; border-style:solid;}
+    .border-slate-200{border-color:var(--slate-200);}
+    .border-slate-300{border-color:var(--slate-300);}
+    .border-emerald-200{border-color:var(--emerald-200);}
+    .border-amber-200{border-color:var(--amber-200);}
+    .border-rose-200{border-color:var(--rose-200);}
+    .rounded{border-radius:10px;}
+    .rounded-lg{border-radius:12px;}
+    .rounded-xl{border-radius:16px;}
+    .rounded-2xl{border-radius:20px;}
+    .rounded-full{border-radius:999px;}
+    .shadow{box-shadow:var(--shadow);}
+    .shadow-sm{box-shadow:var(--shadow-sm);}
+    .h-auto{height:auto;}
+    /* hover (subset) */
+    .hover\:bg-slate-50:hover{background:var(--slate-50);}
+    .hover\:text-slate-800:hover{color:var(--slate-800);}
+    /* buttons (for login templates) */
+    .btn{display:inline-block; padding:10px 14px; border-radius:14px; text-decoration:none; background:#2f6bff; color:#fff; font-weight:800;}
+    .card{background:#fff; border:1px solid var(--slate-200); border-radius:18px; padding:16px; box-shadow:var(--shadow-sm);}
+    /* Gallery helpers */
+    .masonry { column-gap: 1rem; column-count: 2; }
+    @media (min-width: 768px) { .masonry { column-count: 3; } }
+    @media (min-width: 1024px) { .masonry { column-count: 4; } }
+    .masonry-item { break-inside: avoid; margin-bottom: 1rem; }
+  </style>
 </head>
 <body class="bg-slate-50 text-slate-900">
   <div class="max-w-6xl mx-auto px-4 py-10">
@@ -2680,7 +3155,153 @@ DASH_GALLERY_TEMPLATE = """<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ bot_name }}｜相簿</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+    :root{
+      --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-300:#cbd5e1;
+      --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155; --slate-800:#1f2937; --slate-900:#0f172a;
+      --emerald-50:#ecfdf5; --emerald-200:#a7f3d0; --emerald-700:#047857; --emerald-900:#064e3b;
+      --amber-50:#fffbeb; --amber-200:#fde68a; --amber-700:#b45309; --amber-800:#92400e; --amber-900:#78350f;
+      --rose-50:#fff1f2; --rose-200:#fecdd3; --rose-900:#881337;
+      --sky-50:#f0f9ff; --sky-700:#0369a1;
+      --shadow: 0 10px 30px rgba(15, 23, 42, .08);
+      --shadow-sm: 0 6px 18px rgba(15, 23, 42, .06);
+      --radius: 18px;
+    }
+    html,body{height:100%;}
+    body{
+      margin:0;
+      background:var(--slate-50);
+      color:var(--slate-900);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", "Helvetica Neue", Arial;
+    }
+    a{color:inherit;}
+    /* layout */
+    .wrap{max-width:1100px; margin:0 auto; padding:18px 16px 44px;}
+    .max-w-3xl{max-width:768px;}
+    .max-w-5xl{max-width:1024px;}
+    .max-w-6xl{max-width:1152px;}
+    .mx-auto{margin-left:auto; margin-right:auto;}
+    .ml-auto{margin-left:auto;}
+    .block{display:block;}
+    .w-full{width:100%;}
+    .min-w-full{min-width:100%;}
+    .overflow-hidden{overflow:hidden;}
+    .overflow-x-auto{overflow-x:auto;}
+    .break-all{word-break:break-all;}
+    .flex{display:flex;}
+    .inline-flex{display:inline-flex;}
+    .flex-col{flex-direction:column;}
+    .flex-wrap{flex-wrap:wrap;}
+    .items-center{align-items:center;}
+    .items-end{align-items:flex-end;}
+    .items-start{align-items:flex-start;}
+    .justify-between{justify-content:space-between;}
+    .grid{display:grid;}
+    .grid-cols-1{grid-template-columns:1fr;}
+    .gap-1{gap:4px;}
+    .gap-2{gap:8px;}
+    .gap-3{gap:12px;}
+    .gap-4{gap:16px;}
+    .space-y-2 > * + *{margin-top:8px;}
+    .space-y-3 > * + *{margin-top:12px;}
+    .space-y-6 > * + *{margin-top:24px;}
+    .divide-y > * + *{border-top:1px solid var(--slate-200);}
+    /* responsive (subset) */
+    @media (min-width:768px){
+      .md\:flex-row{flex-direction:row;}
+      .md\:items-end{align-items:flex-end;}
+      .md\:items-start{align-items:flex-start;}
+      .md\:justify-between{justify-content:space-between;}
+      .md\:grid-cols-2{grid-template-columns:repeat(2, minmax(0,1fr));}
+      .md\:col-span-2{grid-column:span 2 / span 2;}
+      .md\:mt-0{margin-top:0;}
+      .md\:text-3xl{font-size:30px;}
+    }
+    @media (min-width:1024px){
+      .lg\:grid-cols-3{grid-template-columns:repeat(3, minmax(0,1fr));}
+    }
+    /* spacing */
+    .p-3{padding:12px;}
+    .p-4{padding:16px;}
+    .p-5{padding:20px;}
+    .p-6{padding:24px;}
+    .px-2{padding-left:8px; padding-right:8px;}
+    .px-3{padding-left:12px; padding-right:12px;}
+    .px-4{padding-left:16px; padding-right:16px;}
+    .px-5{padding-left:20px; padding-right:20px;}
+    .py-1{padding-top:4px; padding-bottom:4px;}
+    .py-2{padding-top:8px; padding-bottom:8px;}
+    .py-10{padding-top:40px; padding-bottom:40px;}
+    .mt-1{margin-top:4px;}
+    .mt-2{margin-top:8px;}
+    .mt-3{margin-top:12px;}
+    .mt-4{margin-top:16px;}
+    .mt-5{margin-top:20px;}
+    .mt-6{margin-top:24px;}
+    .mt-8{margin-top:32px;}
+    .mt-10{margin-top:40px;}
+    .pr-4{padding-right:16px;}
+    /* typography */
+    .font-bold{font-weight:800;}
+    .font-semibold{font-weight:700;}
+    .font-mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+    .tracking-tight{letter-spacing:-0.02em;}
+    .text-left{text-align:left;}
+    .text-xs{font-size:12px;}
+    .text-sm{font-size:13px;}
+    .text-lg{font-size:18px;}
+    .text-xl{font-size:20px;}
+    .text-2xl{font-size:26px;}
+    .text-3xl{font-size:30px;}
+    .text-white{color:#fff;}
+    .text-slate-500{color:var(--slate-500);}
+    .text-slate-600{color:var(--slate-600);}
+    .text-slate-700{color:var(--slate-700);}
+    .text-slate-800{color:var(--slate-800);}
+    .text-slate-900{color:var(--slate-900);}
+    .text-emerald-700{color:var(--emerald-700);}
+    .text-emerald-900{color:var(--emerald-900);}
+    .text-amber-700{color:var(--amber-700);}
+    .text-amber-800{color:var(--amber-800);}
+    .text-amber-900{color:var(--amber-900);}
+    .text-rose-900{color:var(--rose-900);}
+    .text-sky-700{color:var(--sky-700);}
+    .underline{text-decoration:underline;}
+    /* surfaces */
+    .bg-white{background:#fff;}
+    .bg-slate-50{background:var(--slate-50);}
+    .bg-slate-100{background:var(--slate-100);}
+    .bg-slate-900{background:var(--slate-900);}
+    .bg-emerald-50{background:var(--emerald-50);}
+    .bg-amber-50{background:var(--amber-50);}
+    .bg-rose-50{background:var(--rose-50);}
+    .bg-sky-50{background:var(--sky-50);}
+    .border{border-width:1px; border-style:solid;}
+    .border-slate-200{border-color:var(--slate-200);}
+    .border-slate-300{border-color:var(--slate-300);}
+    .border-emerald-200{border-color:var(--emerald-200);}
+    .border-amber-200{border-color:var(--amber-200);}
+    .border-rose-200{border-color:var(--rose-200);}
+    .rounded{border-radius:10px;}
+    .rounded-lg{border-radius:12px;}
+    .rounded-xl{border-radius:16px;}
+    .rounded-2xl{border-radius:20px;}
+    .rounded-full{border-radius:999px;}
+    .shadow{box-shadow:var(--shadow);}
+    .shadow-sm{box-shadow:var(--shadow-sm);}
+    .h-auto{height:auto;}
+    /* hover (subset) */
+    .hover\:bg-slate-50:hover{background:var(--slate-50);}
+    .hover\:text-slate-800:hover{color:var(--slate-800);}
+    /* buttons (for login templates) */
+    .btn{display:inline-block; padding:10px 14px; border-radius:14px; text-decoration:none; background:#2f6bff; color:#fff; font-weight:800;}
+    .card{background:#fff; border:1px solid var(--slate-200); border-radius:18px; padding:16px; box-shadow:var(--shadow-sm);}
+    /* Gallery helpers */
+    .masonry { column-gap: 1rem; column-count: 2; }
+    @media (min-width: 768px) { .masonry { column-count: 3; } }
+    @media (min-width: 1024px) { .masonry { column-count: 4; } }
+    .masonry-item { break-inside: avoid; margin-bottom: 1rem; }
+  </style>
   <style>
     .masonry { column-gap: 1rem; column-count: 2; }
     @media (min-width: 768px) { .masonry { column-count: 3; } }
@@ -2806,7 +3427,153 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+    :root{
+      --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-300:#cbd5e1;
+      --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155; --slate-800:#1f2937; --slate-900:#0f172a;
+      --emerald-50:#ecfdf5; --emerald-200:#a7f3d0; --emerald-700:#047857; --emerald-900:#064e3b;
+      --amber-50:#fffbeb; --amber-200:#fde68a; --amber-700:#b45309; --amber-800:#92400e; --amber-900:#78350f;
+      --rose-50:#fff1f2; --rose-200:#fecdd3; --rose-900:#881337;
+      --sky-50:#f0f9ff; --sky-700:#0369a1;
+      --shadow: 0 10px 30px rgba(15, 23, 42, .08);
+      --shadow-sm: 0 6px 18px rgba(15, 23, 42, .06);
+      --radius: 18px;
+    }
+    html,body{height:100%;}
+    body{
+      margin:0;
+      background:var(--slate-50);
+      color:var(--slate-900);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", "Helvetica Neue", Arial;
+    }
+    a{color:inherit;}
+    /* layout */
+    .wrap{max-width:1100px; margin:0 auto; padding:18px 16px 44px;}
+    .max-w-3xl{max-width:768px;}
+    .max-w-5xl{max-width:1024px;}
+    .max-w-6xl{max-width:1152px;}
+    .mx-auto{margin-left:auto; margin-right:auto;}
+    .ml-auto{margin-left:auto;}
+    .block{display:block;}
+    .w-full{width:100%;}
+    .min-w-full{min-width:100%;}
+    .overflow-hidden{overflow:hidden;}
+    .overflow-x-auto{overflow-x:auto;}
+    .break-all{word-break:break-all;}
+    .flex{display:flex;}
+    .inline-flex{display:inline-flex;}
+    .flex-col{flex-direction:column;}
+    .flex-wrap{flex-wrap:wrap;}
+    .items-center{align-items:center;}
+    .items-end{align-items:flex-end;}
+    .items-start{align-items:flex-start;}
+    .justify-between{justify-content:space-between;}
+    .grid{display:grid;}
+    .grid-cols-1{grid-template-columns:1fr;}
+    .gap-1{gap:4px;}
+    .gap-2{gap:8px;}
+    .gap-3{gap:12px;}
+    .gap-4{gap:16px;}
+    .space-y-2 > * + *{margin-top:8px;}
+    .space-y-3 > * + *{margin-top:12px;}
+    .space-y-6 > * + *{margin-top:24px;}
+    .divide-y > * + *{border-top:1px solid var(--slate-200);}
+    /* responsive (subset) */
+    @media (min-width:768px){
+      .md\:flex-row{flex-direction:row;}
+      .md\:items-end{align-items:flex-end;}
+      .md\:items-start{align-items:flex-start;}
+      .md\:justify-between{justify-content:space-between;}
+      .md\:grid-cols-2{grid-template-columns:repeat(2, minmax(0,1fr));}
+      .md\:col-span-2{grid-column:span 2 / span 2;}
+      .md\:mt-0{margin-top:0;}
+      .md\:text-3xl{font-size:30px;}
+    }
+    @media (min-width:1024px){
+      .lg\:grid-cols-3{grid-template-columns:repeat(3, minmax(0,1fr));}
+    }
+    /* spacing */
+    .p-3{padding:12px;}
+    .p-4{padding:16px;}
+    .p-5{padding:20px;}
+    .p-6{padding:24px;}
+    .px-2{padding-left:8px; padding-right:8px;}
+    .px-3{padding-left:12px; padding-right:12px;}
+    .px-4{padding-left:16px; padding-right:16px;}
+    .px-5{padding-left:20px; padding-right:20px;}
+    .py-1{padding-top:4px; padding-bottom:4px;}
+    .py-2{padding-top:8px; padding-bottom:8px;}
+    .py-10{padding-top:40px; padding-bottom:40px;}
+    .mt-1{margin-top:4px;}
+    .mt-2{margin-top:8px;}
+    .mt-3{margin-top:12px;}
+    .mt-4{margin-top:16px;}
+    .mt-5{margin-top:20px;}
+    .mt-6{margin-top:24px;}
+    .mt-8{margin-top:32px;}
+    .mt-10{margin-top:40px;}
+    .pr-4{padding-right:16px;}
+    /* typography */
+    .font-bold{font-weight:800;}
+    .font-semibold{font-weight:700;}
+    .font-mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+    .tracking-tight{letter-spacing:-0.02em;}
+    .text-left{text-align:left;}
+    .text-xs{font-size:12px;}
+    .text-sm{font-size:13px;}
+    .text-lg{font-size:18px;}
+    .text-xl{font-size:20px;}
+    .text-2xl{font-size:26px;}
+    .text-3xl{font-size:30px;}
+    .text-white{color:#fff;}
+    .text-slate-500{color:var(--slate-500);}
+    .text-slate-600{color:var(--slate-600);}
+    .text-slate-700{color:var(--slate-700);}
+    .text-slate-800{color:var(--slate-800);}
+    .text-slate-900{color:var(--slate-900);}
+    .text-emerald-700{color:var(--emerald-700);}
+    .text-emerald-900{color:var(--emerald-900);}
+    .text-amber-700{color:var(--amber-700);}
+    .text-amber-800{color:var(--amber-800);}
+    .text-amber-900{color:var(--amber-900);}
+    .text-rose-900{color:var(--rose-900);}
+    .text-sky-700{color:var(--sky-700);}
+    .underline{text-decoration:underline;}
+    /* surfaces */
+    .bg-white{background:#fff;}
+    .bg-slate-50{background:var(--slate-50);}
+    .bg-slate-100{background:var(--slate-100);}
+    .bg-slate-900{background:var(--slate-900);}
+    .bg-emerald-50{background:var(--emerald-50);}
+    .bg-amber-50{background:var(--amber-50);}
+    .bg-rose-50{background:var(--rose-50);}
+    .bg-sky-50{background:var(--sky-50);}
+    .border{border-width:1px; border-style:solid;}
+    .border-slate-200{border-color:var(--slate-200);}
+    .border-slate-300{border-color:var(--slate-300);}
+    .border-emerald-200{border-color:var(--emerald-200);}
+    .border-amber-200{border-color:var(--amber-200);}
+    .border-rose-200{border-color:var(--rose-200);}
+    .rounded{border-radius:10px;}
+    .rounded-lg{border-radius:12px;}
+    .rounded-xl{border-radius:16px;}
+    .rounded-2xl{border-radius:20px;}
+    .rounded-full{border-radius:999px;}
+    .shadow{box-shadow:var(--shadow);}
+    .shadow-sm{box-shadow:var(--shadow-sm);}
+    .h-auto{height:auto;}
+    /* hover (subset) */
+    .hover\:bg-slate-50:hover{background:var(--slate-50);}
+    .hover\:text-slate-800:hover{color:var(--slate-800);}
+    /* buttons (for login templates) */
+    .btn{display:inline-block; padding:10px 14px; border-radius:14px; text-decoration:none; background:#2f6bff; color:#fff; font-weight:800;}
+    .card{background:#fff; border:1px solid var(--slate-200); border-radius:18px; padding:16px; box-shadow:var(--shadow-sm);}
+    /* Gallery helpers */
+    .masonry { column-gap: 1rem; column-count: 2; }
+    @media (min-width: 768px) { .masonry { column-count: 3; } }
+    @media (min-width: 1024px) { .masonry { column-count: 4; } }
+    .masonry-item { break-inside: avoid; margin-bottom: 1rem; }
+  </style>
   <title>{{ bot_name }} · 設定中心</title>
 </head>
 <body class="bg-slate-50 text-slate-900">
@@ -2985,6 +3752,8 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
 #
 DASH_MAGIC_TOKEN_TTL_SECONDS = int(os.getenv("DASH_MAGIC_TOKEN_TTL_SECONDS", "600"))   # magic link 有效秒數（預設 10 分鐘）
 DASH_SESSION_TTL_SECONDS = int(os.getenv("DASH_SESSION_TTL_SECONDS", "43200"))        # session 有效秒數（預設 12 小時）
+
+_LAST_TASK_EXPIRE_SWEEP_TS = 0.0  # throttle expire_open_photo_tasks on /dash/tasks
 
 DASH_LOGIN_REQUIRED_TEMPLATE = """<!doctype html>
 <html lang="zh-Hant">
@@ -3181,6 +3950,34 @@ def _build_pill_history(days: int, gf_id: str | None) -> list[dict]:
     return out
 
 
+
+def _build_dash_base() -> dict:
+    """Lightweight base context for /dash/* pages (no pill history, no mood/wish lists)."""
+    base_url = get_public_base_url()
+    updated_at = _tz_now().strftime("%Y-%m-%d %H:%M:%S")
+
+    rm = get_role_map_active(db_path=LOVE_DB_PATH)
+    gf_id = rm.get("girlfriend")
+    bf_id = rm.get("boyfriend")
+
+    gf_name = _safe_name(gf_id) or DEFAULT_GIRLFRIEND_NICKNAME
+    bf_name = _safe_name(bf_id) or DEFAULT_BOYFRIEND_NICKNAME
+
+    gf_label = _get_str_setting_global("role_label_girlfriend", "Girlfriend")
+    bf_label = _get_str_setting_global("role_label_boyfriend", "Boyfriend")
+
+    return {
+        "bot_name": BOT_NAME,
+        "base_url": base_url,
+        "updated_at": updated_at,
+        "gf_id": gf_id,
+        "bf_id": bf_id,
+        "gf_name": gf_name,
+        "bf_name": bf_name,
+        "gf_label": gf_label,
+        "bf_label": bf_label,
+    }
+
 def _build_dashboard_data() -> dict:
     base_url = get_public_base_url()
     updated_at = _tz_now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3361,16 +4158,15 @@ def dash_settings():
         except Exception as e:
             error = f"儲存失敗：{e}"
 
-    base_url = get_public_base_url()
-    updated_at = _tz_now().strftime("%Y-%m-%d %H:%M:%S")
-    rm = get_role_map_active(db_path=LOVE_DB_PATH)
-    gf_id = rm.get("girlfriend")
-    bf_id = rm.get("boyfriend")
-
-    gf_name = _safe_name(gf_id) or DEFAULT_GIRLFRIEND_NICKNAME
-    bf_name = _safe_name(bf_id) or DEFAULT_BOYFRIEND_NICKNAME
-    gf_label = _get_str_setting_global("role_label_girlfriend", "Girlfriend")
-    bf_label = _get_str_setting_global("role_label_boyfriend", "Boyfriend")
+    base = _build_dash_base()
+    base_url = base["base_url"]
+    updated_at = base["updated_at"]
+    gf_id = base.get("gf_id")
+    bf_id = base.get("bf_id")
+    gf_name = base["gf_name"]
+    bf_name = base["bf_name"]
+    gf_label = base["gf_label"]
+    bf_label = base["bf_label"]
 
     # weather view values
     v_times = _get_setting_global("weather_remind_times")
@@ -3428,12 +4224,17 @@ def dash_tasks():
     if resp is not None:
         return resp
 
-    base = _build_dashboard_data()
-    # sweep expired open tasks (idempotent)
-    try:
-        sweep = expire_open_photo_tasks(db_path=LOVE_DB_PATH)
-    except Exception:
-        sweep = 0
+    base = _build_dash_base()
+    # sweep expired open tasks (idempotent) - throttled to avoid hitting SQLite/NFS every refresh
+    global _LAST_TASK_EXPIRE_SWEEP_TS
+    now_ts = time.time()
+    sweep = 0
+    if now_ts - _LAST_TASK_EXPIRE_SWEEP_TS >= 60:
+        try:
+            sweep = expire_open_photo_tasks(db_path=LOVE_DB_PATH)
+        except Exception:
+            sweep = 0
+        _LAST_TASK_EXPIRE_SWEEP_TS = now_ts
 
     def _decorate(tasks: list[dict]) -> list[dict]:
         out = []
@@ -3479,7 +4280,7 @@ def dash_gallery():
     if resp is not None:
         return resp
 
-    base = _build_dashboard_data()
+    base = _build_dash_base()
 
     group = (request.args.get("group") or "date").strip().lower()
     if group not in ("date", "task"):
