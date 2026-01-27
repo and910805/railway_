@@ -2089,6 +2089,367 @@ def docs_plain():
     return (help_text(), 200, {"Content-Type": "text/plain; charset=utf-8"})
 
 
+
+
+# ===== Dashboard (private, token-protected) =====
+# 目的：把「LINE 可以問到的資料」用更漂亮的方式呈現在網站上（但避免公開洩漏，所以強制驗證）
+#
+# 啟用方式（Zeabur 環境變數）：
+#   DASHBOARD_TOKEN=一段夠長的隨機字串
+# 存取方式：
+#   https://<your-domain>/dash?k=<DASHBOARD_TOKEN>
+# 或帶 Header：X-Dashboard-Token: <DASHBOARD_TOKEN>
+#
+# 注意：用 query string 會被 server log / browser history 記錄；若你很在意，可改用 header 或加 Basic Auth。
+
+
+DASH_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }}｜儀表板</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-5xl mx-auto px-4 py-10">
+    <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+      <div>
+        <h1 class="text-2xl md:text-3xl font-bold">{{ bot_name }}｜私人儀表板</h1>
+        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a></div>
+      </div>
+      <div class="text-sm text-slate-600">
+        <div>Girlfriend：{{ gf_name or "未設定" }}　·　Boyfriend：{{ bf_name or "未設定" }}</div>
+      </div>
+    </div>
+
+    {% if warning %}
+    <div class="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
+      {{ warning }}
+    </div>
+    {% endif %}
+
+    <div class="mt-8 grid gap-4 md:grid-cols-2">
+      <div class="rounded-2xl bg-white shadow p-6">
+        <div class="text-lg font-semibold">📅 紀念日</div>
+        {% if anniversary_date %}
+          <div class="mt-3 text-3xl font-bold">{{ anniversary_days }}</div>
+          <div class="mt-1 text-sm text-slate-600">從 {{ anniversary_date }} 算起（含當天）</div>
+        {% else %}
+          <div class="mt-3 text-slate-700">尚未設定。到 LINE 輸入：<span class="font-mono bg-slate-100 px-2 py-1 rounded">設定紀念日 YYYY-MM-DD</span></div>
+        {% endif %}
+      </div>
+
+      <div class="rounded-2xl bg-white shadow p-6">
+        <div class="text-lg font-semibold">💊 今天吃藥狀態</div>
+        <div class="mt-3 text-slate-800">{{ pill_today_text }}</div>
+        <div class="mt-3 text-sm text-slate-600">
+          指令：<span class="font-mono bg-slate-100 px-2 py-1 rounded">吃了</span> /
+          <span class="font-mono bg-slate-100 px-2 py-1 rounded">吃藥狀態</span> /
+          <span class="font-mono bg-slate-100 px-2 py-1 rounded">吃藥紀錄 14</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-4 rounded-2xl bg-white shadow p-6">
+      <div class="flex items-center justify-between gap-3">
+        <div class="text-lg font-semibold">📋 事前藥紀錄（最近 {{ pills_days }} 天）</div>
+        <div class="text-sm text-slate-600">最多顯示 30 天</div>
+      </div>
+      <div class="mt-4 overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead class="text-left text-slate-500">
+            <tr>
+              <th class="py-2 pr-4">日期</th>
+              <th class="py-2 pr-4">狀態</th>
+              <th class="py-2 pr-4">時間</th>
+              <th class="py-2 pr-4">提醒次數</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y">
+            {% for r in pills %}
+            <tr>
+              <td class="py-2 pr-4 font-mono">{{ r.day }}</td>
+              <td class="py-2 pr-4">
+                {% if r.taken %}
+                  <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">✅ 已回報</span>
+                {% else %}
+                  <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-slate-700">❌ 未回報</span>
+                {% endif %}
+              </td>
+              <td class="py-2 pr-4">{{ r.taken_time_text or "-" }}</td>
+              <td class="py-2 pr-4">{{ r.remind_count }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="mt-4 grid gap-4 md:grid-cols-2">
+      <div class="rounded-2xl bg-white shadow p-6">
+        <div class="text-lg font-semibold">🟩 多零果（連勝）</div>
+        <div class="mt-3 flex flex-wrap gap-2">
+          {% if duo_enabled %}
+            <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">提醒：開</span>
+          {% else %}
+            <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-slate-700">提醒：關</span>
+          {% endif %}
+
+          {% if duo_done_today %}
+            <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">今天：已玩</span>
+          {% else %}
+            <span class="inline-flex items-center rounded-full bg-amber-50 px-3 py-1 text-amber-800">今天：未回報</span>
+          {% endif %}
+        </div>
+        <div class="mt-3 text-sm text-slate-600">
+          時間窗：{{ duo_window }}　·　頻率：每 {{ duo_every }} 分鐘
+        </div>
+        <div class="mt-3 text-sm text-slate-600">
+          指令：<span class="font-mono bg-slate-100 px-2 py-1 rounded">多零果狀態</span> /
+          <span class="font-mono bg-slate-100 px-2 py-1 rounded">多零果已玩</span> /
+          <span class="font-mono bg-slate-100 px-2 py-1 rounded">多零果提醒開/關</span>
+        </div>
+      </div>
+
+      <div class="rounded-2xl bg-white shadow p-6">
+        <div class="text-lg font-semibold">🧠 最近心情</div>
+        {% if moods %}
+          <ul class="mt-3 space-y-2">
+            {% for m in moods %}
+              <li class="rounded-xl bg-slate-50 p-3">
+                <div class="text-slate-800">{{ m.text }}</div>
+                <div class="mt-1 text-xs text-slate-500">#{{ m.id }} · {{ m.who }} · {{ m.created_at }}</div>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <div class="mt-3 text-slate-700">目前還沒有心情記錄。LINE 指令：<span class="font-mono bg-slate-100 px-2 py-1 rounded">心情 &lt;內容&gt;</span></div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="mt-4 rounded-2xl bg-white shadow p-6">
+      <div class="text-lg font-semibold">✨ 願望清單（最近 {{ wishes_limit }} 筆）</div>
+      {% if wishes %}
+        <div class="mt-3 overflow-x-auto">
+          <table class="min-w-full text-sm">
+            <thead class="text-left text-slate-500">
+              <tr>
+                <th class="py-2 pr-4">#</th>
+                <th class="py-2 pr-4">內容</th>
+                <th class="py-2 pr-4">誰</th>
+                <th class="py-2 pr-4">時間</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y">
+              {% for w in wishes %}
+              <tr>
+                <td class="py-2 pr-4 font-mono">{{ w.id }}</td>
+                <td class="py-2 pr-4">{{ w.text }}</td>
+                <td class="py-2 pr-4">{{ w.who }}</td>
+                <td class="py-2 pr-4 text-slate-600">{{ w.created_at }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="mt-3 text-slate-700">目前還沒有願望。LINE 指令：<span class="font-mono bg-slate-100 px-2 py-1 rounded">許願 &lt;內容&gt;</span></div>
+      {% endif %}
+    </div>
+
+    <div class="mt-6 text-xs text-slate-500">
+      <div>🔒 這是私人頁面：建議設定 DASHBOARD_TOKEN（不要外流）。</div>
+      <div class="mt-1">如果你希望「在 LINE 點按就能打開」又不想用 query token，我可以改成：LINE Flex → 先打 /dash/login 產生一次性短期 token。</div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+def _require_dashboard_auth():
+    token = (os.getenv("DASHBOARD_TOKEN") or "").strip()
+    if not token:
+        abort(403, description="Dashboard is disabled. Please set DASHBOARD_TOKEN.")
+    supplied = (request.args.get("k") or request.headers.get("X-Dashboard-Token") or "").strip()
+    if supplied != token:
+        abort(403)
+
+
+def _get_couple_setting(key: str, gf_id: str | None, bf_id: str | None) -> str:
+    for uid in (gf_id, bf_id):
+        if not uid:
+            continue
+        v = get_setting(db_path=LOVE_DB_PATH, user_id=uid, key=key)
+        if v:
+            return v
+    return ""
+
+
+def _safe_name(uid: str | None) -> str:
+    if not uid:
+        return ""
+    try:
+        return get_display_name(db_path=LOVE_DB_PATH, user_id=uid) or ""
+    except Exception:
+        return ""
+
+
+def _build_pill_history(days: int, gf_id: str | None) -> list[dict]:
+    days = max(1, min(30, int(days)))
+    if not gf_id:
+        return []
+    now = _tz_now()
+    end_day = now.date()
+    start_day = end_day - datetime.timedelta(days=days - 1)
+
+    rows = list_med_pill_rows_between(
+        db_path=LOVE_DB_PATH,
+        user_id=gf_id,
+        start_day=start_day.isoformat(),
+        end_day=end_day.isoformat(),
+    )
+    by_day = {r.get("day"): r for r in rows if r.get("day")}
+    out = []
+    for i in range(days):
+        d = end_day - datetime.timedelta(days=i)
+        ds = d.isoformat()
+        r = by_day.get(ds) or {}
+        taken = bool(r.get("taken_at"))
+        out.append(
+            {
+                "day": ds,
+                "taken": taken,
+                "taken_time_text": (r.get("taken_time_text") or "") if taken else "",
+                "remind_count": int(r.get("remind_count") or 0),
+            }
+        )
+    return out
+
+
+def _build_dashboard_data() -> dict:
+    base_url = get_public_base_url()
+    updated_at = _tz_now().strftime("%Y-%m-%d %H:%M:%S")
+    rm = get_role_map_active(db_path=LOVE_DB_PATH)
+    gf_id = rm.get("girlfriend")
+    bf_id = rm.get("boyfriend")
+
+    gf_name = _safe_name(gf_id) or DEFAULT_GIRLFRIEND_NICKNAME
+    bf_name = _safe_name(bf_id) or DEFAULT_BOYFRIEND_NICKNAME
+
+    # anniversary: prefer stored setting, fallback to env
+    anniversary_date = _get_couple_setting("anniversary", gf_id, bf_id) or (os.getenv("RELATION_START_DATE") or "").strip()
+    anniversary_days = ""
+    warning = ""
+
+    if anniversary_date:
+        try:
+            start = datetime.date.fromisoformat(anniversary_date)
+            today = _tz_now().date()
+            anniversary_days = str((today - start).days + 1)
+        except Exception:
+            warning = "⚠️ 紀念日格式不正確（請在 LINE 重新設定：設定紀念日 YYYY-MM-DD）"
+            anniversary_date = ""
+
+    # pill: today's status (girlfriend as source of truth)
+    pill_today_text = "尚未設定 girlfriend/boyfriend 角色。先在 LINE 打：我是臭寶 / 我是臭晡晡"
+    if gf_id:
+        now = _tz_now()
+        day = now.date().isoformat()
+        row = get_med_pill_row(db_path=LOVE_DB_PATH, user_id=gf_id, day=day) or {}
+        if row.get("taken_at"):
+            pill_today_text = f"{gf_name} 今天已回報（{row.get('taken_time_text') or '已記錄'}）"
+        else:
+            pill_today_text = f"{gf_name} 今天尚未回報（已提醒 {int(row.get('remind_count') or 0)} 次）"
+
+    pills_days = 30
+    pills = _build_pill_history(pills_days, gf_id)
+
+    # duolingo: enabled + done today
+    duo_enabled = None
+    v_enabled = _get_couple_setting("duo_remind_enabled", gf_id, bf_id)
+    if v_enabled != "":
+        duo_enabled = (v_enabled.strip() != "0")
+    else:
+        duo_enabled = (os.getenv("DUO_REMIND_ENABLED", "1").strip() != "0")
+
+    today = _tz_now().date().isoformat()
+    done_day = _get_couple_setting("duo_done_day", gf_id, bf_id)
+    duo_done_today = (done_day == today)
+
+    duo_every = int(os.getenv("DUO_REMIND_EVERY_MINUTES", "10") or 10)
+    duo_start = int(os.getenv("DUO_REMIND_START_HOUR", "22") or 22)
+    duo_end = int(os.getenv("DUO_REMIND_END_HOUR", "23") or 23)
+    duo_window = f"{duo_start:02d}:00～{duo_end:02d}:59"
+
+    # moods (combine gf+bf)
+    moods_out = []
+    try:
+        if gf_id:
+            for m in list_moods(db_path=LOVE_DB_PATH, user_id=gf_id, limit=5):
+                moods_out.append({"id": m["id"], "text": m["text"], "created_at": m["created_at"], "who": gf_name})
+        if bf_id:
+            for m in list_moods(db_path=LOVE_DB_PATH, user_id=bf_id, limit=5):
+                moods_out.append({"id": m["id"], "text": m["text"], "created_at": m["created_at"], "who": bf_name})
+        # sort by created_at (string iso)
+        moods_out.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        moods_out = moods_out[:8]
+    except Exception:
+        moods_out = []
+
+    # wishes (combine gf+bf)
+    wishes_limit = 12
+    wishes_out = []
+    try:
+        if gf_id:
+            for w in list_wishes(db_path=LOVE_DB_PATH, user_id=gf_id, limit=wishes_limit):
+                wishes_out.append({"id": w["id"], "text": w["text"], "created_at": w["created_at"], "who": gf_name})
+        if bf_id:
+            for w in list_wishes(db_path=LOVE_DB_PATH, user_id=bf_id, limit=wishes_limit):
+                wishes_out.append({"id": w["id"], "text": w["text"], "created_at": w["created_at"], "who": bf_name})
+        wishes_out.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        wishes_out = wishes_out[:wishes_limit]
+    except Exception:
+        wishes_out = []
+
+    return {
+        "bot_name": BOT_NAME,
+        "base_url": base_url,
+        "updated_at": updated_at,
+        "gf_name": gf_name,
+        "bf_name": bf_name,
+        "anniversary_date": anniversary_date,
+        "anniversary_days": anniversary_days,
+        "pill_today_text": pill_today_text,
+        "pills_days": pills_days,
+        "pills": pills,
+        "duo_enabled": duo_enabled,
+        "duo_done_today": duo_done_today,
+        "duo_every": duo_every,
+        "duo_window": duo_window,
+        "moods": moods_out,
+        "wishes": wishes_out,
+        "wishes_limit": wishes_limit,
+        "warning": warning,
+    }
+
+
+@app.route("/dash")
+def dash():
+    _require_dashboard_auth()
+    data = _build_dashboard_data()
+    return render_template_string(DASH_TEMPLATE, **data)
+
+
+@app.route("/api/dash")
+def api_dash():
+    _require_dashboard_auth()
+    return jsonify(_build_dashboard_data())
+
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
