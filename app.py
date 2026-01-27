@@ -261,6 +261,8 @@ MED_PILL_NUDGE_MINUTES = int(os.getenv("MED_PILL_NUDGE_MINUTES", "30"))    # eve
 MED_PILL_QUIET_HOURS = os.getenv("MED_PILL_QUIET_HOURS", "00:00-07:00")    # set "" to disable
 
 
+MED_PILL_MAX_REMIND_COUNT = int(os.getenv("MED_PILL_MAX_REMIND_COUNT", "0"))  # 0 = unlimited
+
 # Duolingo streak reminder
 DUO_REMIND_ENABLED = os.getenv("DUO_REMIND_ENABLED", "1") == "1"
 DUO_REMIND_EVERY_MINUTES = int(os.getenv("DUO_REMIND_EVERY_MINUTES", "10"))
@@ -283,6 +285,8 @@ HUMIDITY_RANGE_THRESHOLD = float(os.getenv("HUMIDITY_RANGE_THRESHOLD", "25"))
 # app.py (near thresholds)
 TEMP_LOW_THRESHOLD = float(os.getenv("TEMP_LOW_THRESHOLD", "14"))
 APP_TEMP_LOW_THRESHOLD = float(os.getenv("APP_TEMP_LOW_THRESHOLD", "14"))
+TEMP_HIGH_THRESHOLD = float(os.getenv("TEMP_HIGH_THRESHOLD", "32"))
+APP_TEMP_HIGH_THRESHOLD = float(os.getenv("APP_TEMP_HIGH_THRESHOLD", "34"))
 
 SETTINGS_GLOBAL_USER_ID = "__global__"
 def _parse_task_list_env(key: str, fallback: list[str]) -> list[str]:
@@ -427,10 +431,117 @@ def _parse_hhmm(s: str, default=(21, 30)) -> tuple[int, int]:
         return (h, mm)
     return default
 
-_MED_HOUR, _MED_MIN = _parse_hhmm(MED_PILL_REMIND_TIME)
+# ===== global (DB) settings helpers =====
+def _get_setting_global(key: str) -> str | None:
+    try:
+        return get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=key)
+    except Exception:
+        return None
+
+def _get_str_setting_global(key: str, default: str, allow_empty: bool = False) -> str:
+    v = _get_setting_global(key)
+    if v is None:
+        return default
+    s = str(v)
+    if s == "" and not allow_empty:
+        return default
+    return s
+
+def _get_bool_setting_global(key: str, default: bool) -> bool:
+    v = _get_setting_global(key)
+    if v is None:
+        return default
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
+
+def _get_int_setting_global(key: str, default: int, min_v: int | None = None, max_v: int | None = None) -> int:
+    v = _get_setting_global(key)
+    if v is None or str(v).strip() == "":
+        out = int(default)
+    else:
+        try:
+            out = int(float(str(v).strip()))
+        except Exception:
+            out = int(default)
+    if min_v is not None:
+        out = max(min_v, out)
+    if max_v is not None:
+        out = min(max_v, out)
+    return out
+
+def _get_float_setting_global(key: str, default: float, min_v: float | None = None, max_v: float | None = None) -> float:
+    v = _get_setting_global(key)
+    if v is None or str(v).strip() == "":
+        out = float(default)
+    else:
+        try:
+            out = float(str(v).strip())
+        except Exception:
+            out = float(default)
+    if min_v is not None:
+        out = max(min_v, out)
+    if max_v is not None:
+        out = min(max_v, out)
+    return out
+
+def _get_hhmm_setting_global(key: str, default_hhmm: str) -> tuple[int, int]:
+    raw = _get_str_setting_global(key, default_hhmm)
+    return _parse_hhmm(raw, default=_parse_hhmm(default_hhmm))
+
+def _parse_times_csv(raw: str) -> list[tuple[int, int]]:
+    # "08:30,12:30,17:30"
+    out: list[tuple[int, int]] = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        h, m = _parse_hhmm(part, default=(-1, -1))
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            out.append((h, m))
+    # de-dup
+    uniq = []
+    seen = set()
+    for h, m in out:
+        key = (h, m)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append((h, m))
+    return uniq
+
+def _format_times_csv(times: list[tuple[int, int]]) -> str:
+    return ",".join([f"{h:02d}:{m:02d}" for h, m in times])
+
+# ===== Weather reminder settings =====
+def weather_remind_enabled() -> bool:
+    # default: enabled
+    return _get_bool_setting_global("weather_remind_enabled", True)
+
+def weather_remind_times() -> list[tuple[int, int]]:
+    default_times = _parse_times_csv(_get_str_setting_global("weather_remind_times", "08:30,12:30,17:30"))
+    return default_times or [(8, 30), (12, 30), (17, 30)]
+
+# ===== Medication reminder settings =====
+def med_pill_enabled() -> bool:
+    return _get_bool_setting_global("med_pill_enabled", MED_PILL_ENABLED)
+
+def med_pill_remind_hm() -> tuple[int, int]:
+    # HH:MM
+    return _get_hhmm_setting_global("med_pill_remind_time", MED_PILL_REMIND_TIME)
+
+def med_pill_nudge_minutes() -> int:
+    return _get_int_setting_global("med_pill_nudge_minutes", MED_PILL_NUDGE_MINUTES, 1, 12 * 60)
+
+def med_pill_max_remind_count() -> int:
+    # 0 = unlimited
+    return _get_int_setting_global("med_pill_max_remind_count", MED_PILL_MAX_REMIND_COUNT, 0, 99)
+
+def med_pill_quiet_hours() -> str:
+    # format: "00:00-07:00", set "" to disable
+    return _get_str_setting_global("med_pill_quiet_hours", MED_PILL_QUIET_HOURS, allow_empty=True)
 
 def _in_quiet_hours(now: datetime.datetime) -> bool:
-    raw = (MED_PILL_QUIET_HOURS or "").strip()
+    raw = (med_pill_quiet_hours() or "").strip()
     if not raw:
         return False
     m = re.fullmatch(r"(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})", raw)
@@ -446,28 +557,22 @@ def _in_quiet_hours(now: datetime.datetime) -> bool:
     return start <= now <= end
 
 # ===== Duolingo reminder helpers =====
-def _get_bool_setting_global(key: str, default: bool) -> bool:
-    try:
-        v = get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=key)
-    except Exception:
-        v = None
-    if v is None:
-        return default
-    s = str(v).strip().lower()
-    return s in ("1", "true", "yes", "y", "on")
-
 def duo_remind_enabled() -> bool:
     # settings override env default
     return _get_bool_setting_global("duo_remind_enabled", DUO_REMIND_ENABLED)
 
+def duo_remind_every_minutes() -> int:
+    return _get_int_setting_global("duo_remind_every_minutes", DUO_REMIND_EVERY_MINUTES, 1, 59)
+
+def duo_remind_start_hour() -> int:
+    return _get_int_setting_global("duo_remind_start_hour", DUO_REMIND_START_HOUR, 0, 23)
+
+def duo_remind_end_hour() -> int:
+    return _get_int_setting_global("duo_remind_end_hour", DUO_REMIND_END_HOUR, 0, 23)
+
 def duo_done_today(now: datetime.datetime) -> bool:
-    try:
-        d = get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day")
-    except Exception:
-        d = None
-    return (d or "").strip() == now.date().isoformat()
-
-
+    d = (_get_setting_global("duo_done_day") or "").strip()
+    return d == now.date().isoformat()
 
 def _is_pill_confirm_text(text: str) -> bool:
     t = (text or "").strip()
@@ -779,47 +884,68 @@ def infer_activity_message(nickname: str) -> str:
 
 # ====== weather text builders (per city) ======
 def build_weather_alert_message(city_name: str, metrics: dict) -> str | None:
-    # existing thresholds
+    # thresholds (DB overrides env defaults)
     uv_th = _get_threshold_float("uv_high_threshold", UV_HIGH_THRESHOLD)
     hum_th = _get_threshold_float("humidity_range_threshold", HUMIDITY_RANGE_THRESHOLD)
 
-    # new thresholds
     temp_low_th = _get_threshold_float("temp_low_threshold", TEMP_LOW_THRESHOLD)
     app_low_th = _get_threshold_float("app_temp_low_threshold", APP_TEMP_LOW_THRESHOLD)
 
+    temp_high_th = _get_threshold_float("temp_high_threshold", TEMP_HIGH_THRESHOLD)
+    app_high_th = _get_threshold_float("app_temp_high_threshold", APP_TEMP_HIGH_THRESHOLD)
+
     max_uv = metrics.get("max_uv")
     h_range = metrics.get("humidity_range")
+
     tmin = metrics.get("min_temp")
+    tmax = metrics.get("max_temp")
     amin = metrics.get("min_app_temp")
+    amax = metrics.get("max_app_temp")
 
     triggers = []
     if max_uv is not None and max_uv >= uv_th:
         triggers.append("uv")
     if h_range is not None and h_range >= hum_th:
         triggers.append("humidity")
+
     if tmin is not None and tmin <= temp_low_th:
         triggers.append("temp_low")
     if amin is not None and amin <= app_low_th:
         triggers.append("app_temp_low")
 
+    if tmax is not None and tmax >= temp_high_th:
+        triggers.append("temp_high")
+    if amax is not None and amax >= app_high_th:
+        triggers.append("app_temp_high")
+
     if not triggers:
         return None
 
     lines = []
-    # compose message parts
-    if "temp_low" in triggers or "app_temp_low" in triggers:
-        t_part = f"溫度最低約 {tmin:.1f}°C" if tmin is not None else "溫度偏低"
-        a_part = f"體感最低約 {amin:.1f}°C" if amin is not None else ""
-        lines.append(f"🧥 天氣提醒：今天 {city_name} 偏冷（{t_part}" + (f"，{a_part}" if a_part else "") + "）")
-        lines.append("出門記得加件外套、圍巾/帽子視情況。")
 
-    if "uv" in triggers or "humidity" in triggers:
+    # cold message
+    if ("temp_low" in triggers) or ("app_temp_low" in triggers):
+        t_part = f"最低約 {tmin:.1f}°C" if tmin is not None else "低溫"
+        a_part = f"體感最低約 {amin:.1f}°C" if amin is not None else ""
+        extra = f"，{a_part}" if a_part else ""
+        lines.append(f"🧥 天氣提醒：今天 {city_name} 偏冷（{t_part}{extra}）")
+        lines.append("出門記得加件外套，必要時圍巾/帽子。")
+
+    # hot message
+    if ("temp_high" in triggers) or ("app_temp_high" in triggers):
+        t_part = f"最高約 {tmax:.1f}°C" if tmax is not None else "高溫"
+        a_part = f"體感最高約 {amax:.1f}°C" if amax is not None else ""
+        extra = f"，{a_part}" if a_part else ""
+        lines.append(f"🔥 天氣提醒：今天 {city_name} 偏熱（{t_part}{extra}）")
+        lines.append("注意補水、防曬，避免正中午長時間曝曬。")
+
+    # UV / humidity
+    if ("uv" in triggers) or ("humidity" in triggers):
         uv_part = f"UV 最高約 {max_uv:.1f}" if max_uv is not None else "UV 偏高"
         hum_part = f"濕度波動約 {h_range:.0f}%" if h_range is not None else ""
         lines.append(f"☀️ 另：{city_name} {uv_part}" + (f"，{hum_part}" if hum_part else ""))
 
     return "\n".join(lines)
-
 
 
 def build_weather_summary(city_name: str, metrics: dict) -> str:
@@ -1966,6 +2092,9 @@ _scheduler: BackgroundScheduler | None = None
 
 
 def scheduled_weather_check():
+    if not weather_remind_enabled():
+        print("[SCHED] Weather reminders disabled; skip.", flush=True)
+        return
     if not WEATHER_LOC_MAP:
         print("[SCHED] WEATHER_LOCATIONS empty; skip.", flush=True)
         return
@@ -1987,8 +2116,9 @@ def scheduled_weather_check():
     except Exception as e:
         print("[SCHED] scheduled_weather_check error:", e, flush=True)
 def scheduled_med_pill_daily():
-    if not MED_PILL_ENABLED:
+    if not med_pill_enabled():
         return
+
     rm = get_role_map_active(db_path=LOVE_DB_PATH)
     gf_id = rm.get("girlfriend")
     if not gf_id:
@@ -2003,29 +2133,27 @@ def scheduled_med_pill_daily():
     if row.get("taken_at"):
         return
 
-    row = get_med_pill_row(db_path=LOVE_DB_PATH, user_id=gf_id, day=day) or {}
-    msg = build_med_pill_message(int(row.get("remind_count") or 0))
+    max_cnt = med_pill_max_remind_count()
+    cur_cnt = int(row.get("remind_count") or 0)
+    if max_cnt > 0 and cur_cnt >= max_cnt:
+        return
 
-    line_push_text(
+    msg = build_med_pill_message(cur_cnt)
+    push_and_log(
         gf_id,
         msg,
         reason="MED_DAILY",
         target_role="girlfriend",
     )
 
-    push_and_log(
-    gf_id,
-    msg,
-    reason="MED_DAILY",
-    target_role="girlfriend",
-    )
-
     mark_med_pill_reminded(db_path=LOVE_DB_PATH, user_id=gf_id, day=day, remind_at_iso=now.isoformat(timespec="seconds"))
     print("[SCHED][MED] daily pill reminder pushed.", flush=True)
 
+
 def scheduled_med_pill_nudge():
-    if not MED_PILL_ENABLED:
+    if not med_pill_enabled():
         return
+
     rm = get_role_map_active(db_path=LOVE_DB_PATH)
     gf_id = rm.get("girlfriend")
     if not gf_id:
@@ -2036,7 +2164,8 @@ def scheduled_med_pill_nudge():
         return
 
     # only start nudging after remind time
-    remind_dt = now.replace(hour=_MED_HOUR, minute=_MED_MIN, second=0, microsecond=0)
+    rh, rm_ = med_pill_remind_hm()
+    remind_dt = now.replace(hour=rh, minute=rm_, second=0, microsecond=0)
     if now < remind_dt:
         return
 
@@ -2045,13 +2174,17 @@ def scheduled_med_pill_nudge():
     if row.get("taken_at"):
         return
 
-    last = _parse_dt(row.get("last_remind_at"))
-    if last and (now - last).total_seconds() < MED_PILL_NUDGE_MINUTES * 60:
+    max_cnt = med_pill_max_remind_count()
+    cur_cnt = int(row.get("remind_count") or 0)
+    if max_cnt > 0 and cur_cnt >= max_cnt:
         return
 
-    row = get_med_pill_row(db_path=LOVE_DB_PATH, user_id=gf_id, day=day) or {}
-    msg = build_med_pill_message(int(row.get("remind_count") or 0))
+    last = _parse_dt(row.get("last_remind_at"))
+    nudge_min = med_pill_nudge_minutes()
+    if last and (now - last).total_seconds() < nudge_min * 60:
+        return
 
+    msg = build_med_pill_message(cur_cnt)
     push_and_log(
         gf_id,
         msg,
@@ -2059,11 +2192,8 @@ def scheduled_med_pill_nudge():
         target_role="girlfriend",
     )
 
-
     mark_med_pill_reminded(db_path=LOVE_DB_PATH, user_id=gf_id, day=day, remind_at_iso=now.isoformat(timespec="seconds"))
     print("[SCHED][MED] nudge pushed.", flush=True)
-
-
 
 
 def scheduled_duo_remind():
@@ -2080,46 +2210,72 @@ def scheduled_duo_remind():
 
     msg = (
         "Duolingo 時間！\n"
-        "10 分鐘一次提醒：記得去玩一下，別斷連勝。\n"
+        f"{duo_remind_every_minutes()} 分鐘一次提醒：記得去玩一下，別斷連勝。\n"
         "（回「Duolingo已玩」可暫停今天提醒）"
     )
     push_to_couple_text(msg, fallback_user_id=None)
     print("[SCHED][DUO] reminder pushed.", flush=True)
 
-def start_scheduler():
-    global _scheduler
-    if _scheduler:
+def _scheduler_remove_if_exists(sched: BackgroundScheduler, job_id: str):
+    try:
+        sched.remove_job(job_id)
+    except Exception:
         return
-    sched = BackgroundScheduler(timezone=_tz())
-    sched.add_job(scheduled_weather_check, "cron", hour=8, minute=30, id="weather_0830", replace_existing=True)
-    sched.add_job(scheduled_weather_check, "cron", hour=12, minute=30, id="weather_1230", replace_existing=True)
-    sched.add_job(scheduled_weather_check, "cron", hour=17, minute=30, id="weather_1730", replace_existing=True)
 
-    # medication reminder
-    if MED_PILL_ENABLED:
+def _scheduler_apply_settings(sched: BackgroundScheduler):
+    # ===== weather jobs =====
+    for j in list(sched.get_jobs()):
+        if (j.id or "").startswith("weather_"):
+            _scheduler_remove_if_exists(sched, j.id)
+
+    if weather_remind_enabled():
+        times = weather_remind_times()
+        for i, (h, m) in enumerate(times):
+            sched.add_job(
+                scheduled_weather_check,
+                "cron",
+                hour=h,
+                minute=m,
+                id=f"weather_{h:02d}{m:02d}_{i}",
+                replace_existing=True,
+            )
+        print(f"[SCHED] Weather jobs applied: {_format_times_csv(times)}", flush=True)
+    else:
+        print("[SCHED] Weather reminders disabled (no weather jobs).", flush=True)
+
+    # ===== medication jobs =====
+    _scheduler_remove_if_exists(sched, "med_pill_daily")
+    _scheduler_remove_if_exists(sched, "med_pill_nudge")
+
+    if med_pill_enabled():
+        rh, rm_ = med_pill_remind_hm()
         sched.add_job(
             scheduled_med_pill_daily,
             "cron",
-            hour=_MED_HOUR,
-            minute=_MED_MIN,
+            hour=rh,
+            minute=rm_,
             id="med_pill_daily",
             replace_existing=True,
         )
-        # run frequently, but only push if >= MED_PILL_NUDGE_MINUTES since last reminder
+        # run frequently, but only push if >= nudge_minutes since last reminder
+        poll = max(1, min(5, med_pill_nudge_minutes()))
         sched.add_job(
             scheduled_med_pill_nudge,
             "interval",
-            minutes=5,
+            minutes=poll,
             id="med_pill_nudge",
             replace_existing=True,
         )
+        print(f"[SCHED] Med jobs applied: remind={rh:02d}:{rm_:02d} nudge={med_pill_nudge_minutes()}m poll={poll}m max={med_pill_max_remind_count()}", flush=True)
+    else:
+        print("[SCHED] Med reminders disabled (no med jobs).", flush=True)
 
-    
-    # duolingo reminder
+    # ===== duolingo job (always scheduled; gated by duo_remind_enabled in function) =====
+    _scheduler_remove_if_exists(sched, "duo_remind")
     try:
-        every = max(1, min(59, int(DUO_REMIND_EVERY_MINUTES)))
-        sh = max(0, min(23, int(DUO_REMIND_START_HOUR)))
-        eh = max(0, min(23, int(DUO_REMIND_END_HOUR)))
+        every = duo_remind_every_minutes()
+        sh = duo_remind_start_hour()
+        eh = duo_remind_end_hour()
         if eh < sh:
             eh = sh
         sched.add_job(
@@ -2130,12 +2286,30 @@ def start_scheduler():
             id="duo_remind",
             replace_existing=True,
         )
+        print(f"[SCHED] Duo job applied: {sh:02d}:00-{eh:02d}:59 every {every}m", flush=True)
     except Exception as e:
         print("[SCHED][DUO] add_job error:", e, flush=True)
 
+
+def refresh_scheduler_jobs():
+    if not _scheduler:
+        return
+    try:
+        _scheduler_apply_settings(_scheduler)
+    except Exception as e:
+        print("[SCHED] refresh_scheduler_jobs error:", e, flush=True)
+
+
+def start_scheduler():
+    global _scheduler
+    if _scheduler:
+        return
+    sched = BackgroundScheduler(timezone=_tz())
+    _scheduler_apply_settings(sched)
     sched.start()
     _scheduler = sched
     print("[SCHED] started.", flush=True)
+
 
 
 
@@ -2202,10 +2376,10 @@ DASH_TEMPLATE = """<!doctype html>
     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
       <div>
         <h1 class="text-2xl md:text-3xl font-bold">{{ bot_name }}｜私人儀表板</h1>
-        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a></div>
+        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a>　·　<a class="underline" href="/dash/settings">設定中心</a></div>
       </div>
       <div class="text-sm text-slate-600">
-        <div>Girlfriend：{{ gf_name or "未設定" }}　·　Boyfriend：{{ bf_name or "未設定" }}</div>
+        <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
       </div>
     </div>
 
@@ -2353,6 +2527,174 @@ DASH_TEMPLATE = """<!doctype html>
 </body>
 </html>
 """
+
+DASH_SETTINGS_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <title>{{ bot_name }} · 設定中心</title>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="mx-auto max-w-5xl p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <div class="text-2xl font-bold">{{ bot_name }} · 設定中心</div>
+        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="/dash">回儀表板</a></div>
+      </div>
+      <div class="text-sm text-slate-600">
+        <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
+      </div>
+    </div>
+
+    {% if status %}
+      <div class="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-900">{{ status }}</div>
+    {% endif %}
+    {% if error %}
+      <div class="mt-6 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-rose-900">{{ error }}</div>
+    {% endif %}
+
+    <form class="mt-6 space-y-6" method="post">
+      <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
+        <div class="text-lg font-semibold">天氣提醒</div>
+        <div class="mt-1 text-sm text-slate-600">門檻與提醒時段（不用改 env / 重啟）。提醒時段格式：<span class="font-mono">08:30,12:30,17:30</span></div>
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label class="flex items-center gap-2">
+            <input type="checkbox" name="weather_remind_enabled" value="1" {% if weather_remind_enabled %}checked{% endif %} />
+            <span>啟用天氣提醒推播</span>
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">提醒時段（CSV）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="weather_remind_times" value="{{ weather_remind_times }}" placeholder="08:30,12:30,17:30" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">低溫門檻（°C）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="temp_low_threshold" value="{{ temp_low_threshold }}" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">高溫門檻（°C）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="temp_high_threshold" value="{{ temp_high_threshold }}" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">體感低溫門檻（°C）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="app_temp_low_threshold" value="{{ app_temp_low_threshold }}" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">體感高溫門檻（°C）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="app_temp_high_threshold" value="{{ app_temp_high_threshold }}" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">UV 門檻</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="uv_high_threshold" value="{{ uv_high_threshold }}" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">濕度波動門檻（%）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="humidity_range_threshold" value="{{ humidity_range_threshold }}" />
+          </label>
+        </div>
+      </div>
+
+      <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
+        <div class="text-lg font-semibold">Duolingo 提醒</div>
+        <div class="mt-1 text-sm text-slate-600">時段/頻率（提醒開關仍可用 LINE 指令）。</div>
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label class="flex items-center gap-2">
+            <input type="checkbox" name="duo_remind_enabled" value="1" {% if duo_remind_enabled %}checked{% endif %} />
+            <span>啟用 Duolingo 提醒</span>
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">提醒頻率（分鐘）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="duo_remind_every_minutes" value="{{ duo_remind_every_minutes }}" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">開始小時（0-23）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="duo_remind_start_hour" value="{{ duo_remind_start_hour }}" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">結束小時（0-23）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="duo_remind_end_hour" value="{{ duo_remind_end_hour }}" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">今天已玩（顯示用）</div>
+            <div class="mt-2 text-sm">{{ "是" if duo_done_today else "否" }}</div>
+          </label>
+        </div>
+      </div>
+
+      <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
+        <div class="text-lg font-semibold">吃藥提醒</div>
+        <div class="mt-1 text-sm text-slate-600">提醒時間/間隔/最多提醒幾次。</div>
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label class="flex items-center gap-2">
+            <input type="checkbox" name="med_pill_enabled" value="1" {% if med_pill_enabled %}checked{% endif %} />
+            <span>啟用吃藥提醒</span>
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">每日提醒時間（HH:MM）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="med_pill_remind_time" value="{{ med_pill_remind_time }}" placeholder="23:00" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">提醒間隔（分鐘）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="med_pill_nudge_minutes" value="{{ med_pill_nudge_minutes }}" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">最多提醒幾次（0=不限）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="med_pill_max_remind_count" value="{{ med_pill_max_remind_count }}" />
+          </label>
+
+          <label class="block md:col-span-2">
+            <div class="text-sm text-slate-600">安靜時段（HH:MM-HH:MM，留空=不啟用）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="med_pill_quiet_hours" value="{{ med_pill_quiet_hours }}" placeholder="00:00-07:00" />
+          </label>
+        </div>
+      </div>
+
+      <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
+        <div class="text-lg font-semibold">角色顯示名稱</div>
+        <div class="mt-1 text-sm text-slate-600">儀表板顯示用（不影響 LINE 顯示名稱）。</div>
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label class="block">
+            <div class="text-sm text-slate-600">Girlfriend 標籤</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="role_label_girlfriend" value="{{ role_label_girlfriend }}" placeholder="Girlfriend" />
+          </label>
+          <label class="block">
+            <div class="text-sm text-slate-600">Boyfriend 標籤</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="role_label_boyfriend" value="{{ role_label_boyfriend }}" placeholder="Boyfriend" />
+          </label>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <button class="rounded-2xl bg-slate-900 text-white px-5 py-2" type="submit">儲存並套用</button>
+        <a class="rounded-2xl border border-slate-300 px-5 py-2" href="/dash">取消</a>
+      </div>
+
+      <div class="text-xs text-slate-500">
+        <div>備註：儲存後會即時套用排程（APScheduler）。若你目前關掉 ENABLE_SCHEDULER，設定會保存但不會推播。</div>
+      </div>
+    </form>
+  </div>
+</body>
+</html>
+"""
+
+
+
 
 
 
@@ -2576,6 +2918,9 @@ def _build_dashboard_data() -> dict:
     gf_name = _safe_name(gf_id) or DEFAULT_GIRLFRIEND_NICKNAME
     bf_name = _safe_name(bf_id) or DEFAULT_BOYFRIEND_NICKNAME
 
+    gf_label = _get_str_setting_global("role_label_girlfriend", "Girlfriend")
+    bf_label = _get_str_setting_global("role_label_boyfriend", "Boyfriend")
+
     # anniversary: prefer stored setting, fallback to env
     anniversary_date = _get_couple_setting("anniversary", gf_id, bf_id) or (os.getenv("RELATION_START_DATE") or "").strip()
     anniversary_days = ""
@@ -2604,21 +2949,14 @@ def _build_dashboard_data() -> dict:
     pills_days = 30
     pills = _build_pill_history(pills_days, gf_id)
 
+
     # duolingo: enabled + done today
-    duo_enabled = None
-    v_enabled = _get_couple_setting("duo_remind_enabled", gf_id, bf_id)
-    if v_enabled != "":
-        duo_enabled = (v_enabled.strip() != "0")
-    else:
-        duo_enabled = (os.getenv("DUO_REMIND_ENABLED", "1").strip() != "0")
-
-    today = _tz_now().date().isoformat()
-    done_day = _get_couple_setting("duo_done_day", gf_id, bf_id)
-    duo_done_today = (done_day == today)
-
-    duo_every = int(os.getenv("DUO_REMIND_EVERY_MINUTES", "10") or 10)
-    duo_start = int(os.getenv("DUO_REMIND_START_HOUR", "22") or 22)
-    duo_end = int(os.getenv("DUO_REMIND_END_HOUR", "23") or 23)
+    duo_enabled = duo_remind_enabled()
+    now = _tz_now()
+    duo_done_today_flag = duo_done_today(now)
+    duo_every = duo_remind_every_minutes()
+    duo_start = duo_remind_start_hour()
+    duo_end = duo_remind_end_hour()
     duo_window = f"{duo_start:02d}:00～{duo_end:02d}:59"
 
     # moods (combine gf+bf)
@@ -2656,14 +2994,16 @@ def _build_dashboard_data() -> dict:
         "base_url": base_url,
         "updated_at": updated_at,
         "gf_name": gf_name,
+        "gf_label": gf_label,
         "bf_name": bf_name,
+        "bf_label": bf_label,
         "anniversary_date": anniversary_date,
         "anniversary_days": anniversary_days,
         "pill_today_text": pill_today_text,
         "pills_days": pills_days,
         "pills": pills,
         "duo_enabled": duo_enabled,
-        "duo_done_today": duo_done_today,
+        "duo_done_today": duo_done_today_flag,
         "duo_every": duo_every,
         "duo_window": duo_window,
         "moods": moods_out,
@@ -2706,6 +3046,99 @@ def dash_logout():
     session.pop("dash_exp", None)
     session.pop("dash_at", None)
     return redirect("/dash")
+
+@app.route("/dash/settings", methods=["GET", "POST"])
+def dash_settings():
+    resp = _dash_require_page()
+    if resp is not None:
+        return resp
+
+    status = ""
+    error = ""
+
+    if request.method == "POST":
+        try:
+            def _set(key: str, val: str):
+                set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=key, value=val)
+
+            # weather
+            _set("weather_remind_enabled", "1" if request.form.get("weather_remind_enabled") else "0")
+            _set("weather_remind_times", (request.form.get("weather_remind_times") or "").strip())
+            for k in ("temp_low_threshold", "temp_high_threshold", "app_temp_low_threshold", "app_temp_high_threshold", "uv_high_threshold", "humidity_range_threshold"):
+                _set(k, (request.form.get(k) or "").strip())
+
+            # duolingo
+            _set("duo_remind_enabled", "1" if request.form.get("duo_remind_enabled") else "0")
+            for k in ("duo_remind_every_minutes", "duo_remind_start_hour", "duo_remind_end_hour"):
+                _set(k, (request.form.get(k) or "").strip())
+
+            # medication
+            _set("med_pill_enabled", "1" if request.form.get("med_pill_enabled") else "0")
+            for k in ("med_pill_remind_time", "med_pill_nudge_minutes", "med_pill_max_remind_count"):
+                _set(k, (request.form.get(k) or "").strip())
+            # allow empty to disable quiet hours
+            _set("med_pill_quiet_hours", (request.form.get("med_pill_quiet_hours") or ""))
+
+            # role labels (dashboard only)
+            _set("role_label_girlfriend", (request.form.get("role_label_girlfriend") or "").strip())
+            _set("role_label_boyfriend", (request.form.get("role_label_boyfriend") or "").strip())
+
+            refresh_scheduler_jobs()
+            status = "已儲存並套用。"
+        except Exception as e:
+            error = f"儲存失敗：{e}"
+
+    base_url = get_public_base_url()
+    updated_at = _tz_now().strftime("%Y-%m-%d %H:%M:%S")
+    rm = get_role_map_active(db_path=LOVE_DB_PATH)
+    gf_id = rm.get("girlfriend")
+    bf_id = rm.get("boyfriend")
+
+    gf_name = _safe_name(gf_id) or DEFAULT_GIRLFRIEND_NICKNAME
+    bf_name = _safe_name(bf_id) or DEFAULT_BOYFRIEND_NICKNAME
+    gf_label = _get_str_setting_global("role_label_girlfriend", "Girlfriend")
+    bf_label = _get_str_setting_global("role_label_boyfriend", "Boyfriend")
+
+    # weather view values
+    v_times = _get_setting_global("weather_remind_times")
+    weather_times = (v_times if (v_times is not None and v_times.strip() != "") else "08:30,12:30,17:30")
+    data = {
+        "bot_name": BOT_NAME,
+        "base_url": base_url,
+        "updated_at": updated_at,
+        "status": status,
+        "error": error,
+        "gf_name": gf_name,
+        "bf_name": bf_name,
+        "gf_label": gf_label,
+        "bf_label": bf_label,
+
+        "weather_remind_enabled": weather_remind_enabled(),
+        "weather_remind_times": weather_times,
+        "temp_low_threshold": f"{_get_threshold_float('temp_low_threshold', TEMP_LOW_THRESHOLD):g}",
+        "temp_high_threshold": f"{_get_threshold_float('temp_high_threshold', TEMP_HIGH_THRESHOLD):g}",
+        "app_temp_low_threshold": f"{_get_threshold_float('app_temp_low_threshold', APP_TEMP_LOW_THRESHOLD):g}",
+        "app_temp_high_threshold": f"{_get_threshold_float('app_temp_high_threshold', APP_TEMP_HIGH_THRESHOLD):g}",
+        "uv_high_threshold": f"{_get_threshold_float('uv_high_threshold', UV_HIGH_THRESHOLD):g}",
+        "humidity_range_threshold": f"{_get_threshold_float('humidity_range_threshold', HUMIDITY_RANGE_THRESHOLD):g}",
+
+        "duo_remind_enabled": duo_remind_enabled(),
+        "duo_remind_every_minutes": duo_remind_every_minutes(),
+        "duo_remind_start_hour": duo_remind_start_hour(),
+        "duo_remind_end_hour": duo_remind_end_hour(),
+        "duo_done_today": duo_done_today(_tz_now()),
+
+        "med_pill_enabled": med_pill_enabled(),
+        "med_pill_remind_time": _get_str_setting_global("med_pill_remind_time", MED_PILL_REMIND_TIME),
+        "med_pill_nudge_minutes": med_pill_nudge_minutes(),
+        "med_pill_max_remind_count": med_pill_max_remind_count(),
+        "med_pill_quiet_hours": (lambda v: MED_PILL_QUIET_HOURS if v is None else str(v))(_get_setting_global("med_pill_quiet_hours")),
+
+        "role_label_girlfriend": gf_label,
+        "role_label_boyfriend": bf_label,
+    }
+    return render_template_string(DASH_SETTINGS_TEMPLATE, **data)
+
 
 @app.route("/dash")
 def dash():
