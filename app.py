@@ -10,7 +10,7 @@ from typing import Optional
 import re
 
 import requests
-from flask import Flask, jsonify, request, send_file, abort
+from flask import Flask, jsonify, request, send_file, abort, render_template_string, redirect
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -75,6 +75,149 @@ LINE_TARGET_USER_ID = os.getenv("LINE_TARGET_USER_ID")  # fallback push target
 
 BOT_NAME = os.getenv("BOT_NAME", "臭寶對話機器人")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Taipei")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+
+def get_public_base_url() -> str:
+    """Best-effort public base URL for links in LINE & docs page."""
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
+
+    # Zeabur/Reverse proxy headers
+    proto = request.headers.get("X-Forwarded-Proto") or "https"
+    host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host") or request.host
+    return f"{proto}://{host}".rstrip("/")
+
+DOC_SECTIONS = [
+    {
+        "id": "quickstart",
+        "title": "快速開始（3 步）",
+        "items": [
+            {"cmd": "我是臭寶", "desc": "設定身份（女友）"},
+            {"cmd": "我是臭晡晡", "desc": "設定身份（男友）"},
+            {"cmd": "加入推播", "desc": "讓你收到提醒/通知"},
+        ],
+        "note": "建議兩個人都先設定身份 + 加入推播，後續提醒與照片轉送才會完整運作。",
+    },
+    {
+        "id": "pill",
+        "title": "事前藥（吃藥提醒/紀錄）",
+        "items": [
+            {"cmd": "吃了", "desc": "回報今天已吃（也可用：吃完 / 吃了 21:30）"},
+            {"cmd": "吃藥狀態", "desc": "查看今天是否已回報"},
+            {"cmd": "吃藥紀錄 14", "desc": "列出最近 N 天吃藥時間（最多 30 天）"},
+            {"cmd": "取消吃藥", "desc": "撤銷今天的回報（誤傳可用）"},
+        ],
+        "note": "你只要正常回：『吃了』或『吃完 21:30』，bot 會記錄並通知另一方。",
+    },
+    {
+        "id": "duo",
+        "title": "多零果（連勝提醒）",
+        "items": [
+            {"cmd": "多零果狀態", "desc": "查看提醒是否開啟、今天是否已玩"},
+            {"cmd": "多零果提醒開", "desc": "每天 22:00 起每 10 分鐘提醒一次"},
+            {"cmd": "多零果提醒關", "desc": "關閉提醒"},
+            {"cmd": "多零果已玩", "desc": "今天已完成，今晚不再提醒"},
+        ],
+        "note": "提醒預設 22:00～23:50；想延長到半夜或改頻率我也可以幫你改成可設定的時間窗。",
+    },
+    {
+        "id": "bridge",
+        "title": "對話橋樑（代傳訊息）",
+        "items": [
+            {"cmd": "跟臭寶說 今天要不要吃壽司", "desc": "轉達訊息給對方"},
+            {"cmd": "跟臭晡晡說 我下班了", "desc": "轉達訊息給對方"},
+            {"cmd": "對話狀態", "desc": "查看橋樑模式/互動狀態摘要"},
+        ],
+    },
+    {
+        "id": "photo",
+        "title": "攝影任務 & 照片轉送",
+        "items": [
+            {"cmd": "攝影選項", "desc": "列出可用任務選項"},
+            {"cmd": "攝影任務", "desc": "隨機互拍（雙方各一個）"},
+            {"cmd": "攝影任務 給臭寶 自拍自己給我看", "desc": "指定任務內容"},
+            {"cmd": "任務狀態", "desc": "查看未完成任務"},
+        ],
+        "note": "把照片傳給 bot 會自動轉送給對方；若在任務期間會自動判定交作業並標記完成。",
+    },
+    {
+        "id": "weather",
+        "title": "天氣",
+        "items": [
+            {"cmd": "天氣", "desc": "看全部地點天氣摘要"},
+            {"cmd": "天氣 台北", "desc": "指定地點天氣"},
+            {"cmd": "天氣提醒", "desc": "符合門檻才推播提醒"},
+        ],
+    },
+]
+
+DOC_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }}｜使用說明</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="mx-auto max-w-3xl px-4 py-10">
+    <div class="flex items-start justify-between gap-4">
+      <div>
+        <h1 class="text-3xl font-bold tracking-tight">{{ bot_name }} 使用說明</h1>
+        <p class="mt-2 text-sm text-slate-600">
+          這頁是給人看的完整版教學；LINE 內的 help 會只給「精簡版 + 連結」，避免字數/排版限制。
+        </p>
+        <p class="mt-1 text-xs text-slate-500">更新時間：{{ updated_at }}</p>
+      </div>
+      <div class="rounded-xl bg-white shadow p-4 text-xs text-slate-600">
+        <div class="font-semibold text-slate-800">入口連結</div>
+        <div class="mt-1 break-all">{{ base_url }}/docs</div>
+      </div>
+    </div>
+
+    <div class="mt-8 rounded-2xl bg-white shadow p-6">
+      <h2 class="text-xl font-semibold">目錄</h2>
+      <div class="mt-3 flex flex-wrap gap-2">
+        {% for s in sections %}
+          <a href="#{{ s.id }}" class="rounded-full border border-slate-200 px-3 py-1 text-sm hover:bg-slate-50">{{ s.title }}</a>
+        {% endfor %}
+      </div>
+    </div>
+
+    {% for s in sections %}
+      <section id="{{ s.id }}" class="mt-8 rounded-2xl bg-white shadow p-6">
+        <div class="flex items-center justify-between">
+          <h2 class="text-xl font-semibold">{{ s.title }}</h2>
+          <a href="#top" class="text-sm text-slate-500 hover:text-slate-800">回到頂部</a>
+        </div>
+
+        {% if s.note %}
+          <p class="mt-2 text-sm text-slate-600">{{ s.note }}</p>
+        {% endif %}
+
+        <div class="mt-4 space-y-3">
+          {% for it in s.items %}
+            <div class="rounded-xl border border-slate-200 p-4">
+              <div class="flex items-center justify-between gap-3">
+                <code class="text-sm font-semibold text-slate-900 break-all">{{ it.cmd }}</code>
+                <button class="text-xs rounded-lg border border-slate-200 px-2 py-1 hover:bg-slate-50"
+                        onclick="navigator.clipboard.writeText('{{ it.cmd }}')">複製</button>
+              </div>
+              <p class="mt-2 text-sm text-slate-600">{{ it.desc }}</p>
+            </div>
+          {% endfor %}
+        </div>
+      </section>
+    {% endfor %}
+
+    <div class="mt-10 text-xs text-slate-500">
+      <p>想把這頁做得更像「產品官網」：我可以幫你加 FAQ、示意圖、QR code、甚至做成獨立前端（Vite/Next.js）在 Zeabur 另一個 service。</p>
+    </div>
+  </div>
+
+  <a id="top"></a>
+</body>
+</html>"""
 
 DEFAULT_GIRLFRIEND_NICKNAME = os.getenv("GIRLFRIEND_NICKNAME", "臭寶")
 DEFAULT_SELF_NICKNAME = os.getenv("SELF_NICKNAME", "臭晡晡")
@@ -438,17 +581,22 @@ def verify_line_signature(raw_body: bytes) -> bool:
     return hmac.compare_digest(expected, sig)
 
 
-def line_reply(reply_token: str, message: str):
+def line_reply_messages(reply_token: str, messages: list[dict]):
     if not LINE_CHANNEL_ACCESS_TOKEN:
         return
     url = "https://api.line.me/v2/bot/message/reply"
-    body = {"replyToken": reply_token, "messages": [{"type": "text", "text": message}]}
+    body = {"replyToken": reply_token, "messages": messages}
     try:
         resp = requests.post(url, headers=_line_headers(), json=body, timeout=10)
         if resp.status_code != 200:
             print("Reply status:", resp.status_code, "body:", resp.text[:300], flush=True)
     except Exception as e:
         print("Reply error:", e, flush=True)
+
+
+def line_reply(reply_token: str, message: str):
+    # Backward-compatible text-only reply
+    return line_reply_messages(reply_token, [{"type": "text", "text": message}])
 
 
 def line_push_messages(to_user_id: str, messages: list[dict]):
@@ -993,6 +1141,68 @@ def help_text() -> str:
 
 
 
+
+
+def help_quick_text(base_url: str) -> str:
+    return (
+        f"📘 使用說明（完整版）：{base_url}/docs\n"
+        "\n"
+        "常用：\n"
+        "  我是臭寶 / 我是臭晡晡\n"
+        "  加入推播\n"
+        "  吃藥狀態 / 吃藥紀錄 14\n"
+        "  多零果狀態 / 多零果已玩\n"
+        "  攝影任務 / 任務狀態\n"
+        "\n"
+        "（LINE 內 help 會精簡，完整排版請看網站）"
+    )
+
+
+def build_help_flex(base_url: str) -> dict:
+    # Flex Message bubble
+    return {
+        "type": "bubble",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
+            "contents": [
+                {"type": "text", "text": f"{BOT_NAME} 使用說明", "weight": "bold", "size": "xl"},
+                {"type": "text", "text": "LINE 內排版/字數有限，我把完整版做成網站。", "wrap": True, "size": "sm", "color": "#666666"},
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "contents": [
+                        {"type": "text", "text": "快速指令", "size": "sm", "weight": "bold"},
+                        {"type": "text", "text": "• 吃藥狀態 / 吃藥紀錄 14", "wrap": True, "size": "sm"},
+                        {"type": "text", "text": "• 多零果已玩 / 多零果狀態", "wrap": True, "size": "sm"},
+                        {"type": "text", "text": "• 攝影任務 / 任務狀態", "wrap": True, "size": "sm"},
+                    ],
+                },
+            ],
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "action": {"type": "uri", "label": "開啟使用說明", "uri": f"{base_url}/docs"},
+                },
+                {
+                    "type": "button",
+                    "style": "secondary",
+                    "action": {"type": "message", "label": "貼我精簡版", "text": "help2"},
+                },
+            ],
+        },
+    }
+
+
+
 def _cmd(text: str) -> tuple[str, str]:
     """
     支援：
@@ -1118,7 +1328,18 @@ def handle_command(user_id: str, text: str) -> str:
     cmd, arg = _cmd(text)
 
     if cmd in ("help", "說明", "幫助"):
-        return help_text()
+        base_url = get_public_base_url()
+        return [
+            {
+                "type": "flex",
+                "altText": f"{BOT_NAME} 使用說明",
+                "contents": build_help_flex(base_url),
+            }
+        ]
+
+    if cmd in ("help2", "指令", "常用指令"):
+        base_url = get_public_base_url()
+        return help_quick_text(base_url)
 
     # identity / push
     if cmd == "我是臭寶":
@@ -1603,7 +1824,10 @@ def process_line_events(body):
 
             out = handle_command(user_id, text)
             if reply_token:
-                line_reply(reply_token, out)
+                if isinstance(out, list):
+                    line_reply_messages(reply_token, out)
+                else:
+                    line_reply(reply_token, out)
             continue
 
         if msg_type == "image":
@@ -1843,7 +2067,26 @@ if ENABLE_SCHEDULER:
 # ====== routes ======
 @app.route("/")
 def index():
-    return f"✅ {BOT_NAME} running", 200
+    return redirect("/docs")
+
+
+@app.route("/docs")
+def docs():
+    base_url = get_public_base_url()
+    updated_at = _tz_now().strftime("%Y-%m-%d %H:%M")
+    return render_template_string(
+        DOC_TEMPLATE,
+        bot_name=BOT_NAME,
+        base_url=base_url,
+        updated_at=updated_at,
+        sections=DOC_SECTIONS,
+    )
+
+
+@app.route("/docs/plain")
+def docs_plain():
+    # 方便你 debug（純文字完整版）
+    return (help_text(), 200, {"Content-Type": "text/plain; charset=utf-8"})
 
 
 @app.route("/health")
