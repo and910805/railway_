@@ -10,7 +10,7 @@ from typing import Optional
 import re
 
 import requests
-from flask import Flask, jsonify, request, send_file, abort, render_template_string, redirect
+from flask import Flask, jsonify, request, send_file, abort, render_template_string, redirect, session
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -54,6 +54,8 @@ from db_love import (
     get_media_record,
     # NEW
     mark_message_processed,
+    create_dashboard_magic_token,
+    consume_dashboard_magic_token,
 )
 
 
@@ -71,6 +73,25 @@ app = Flask(__name__)
 # ====== Env ======
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()  # optional but recommended
+
+
+# ====== Flask session (for dashboard login) ======
+# 建議在 Zeabur 設定：
+#   FLASK_SECRET_KEY=一段夠長的隨機字串（或用 SECRET_KEY）
+# 若沒設定，會用隨機值，缺點是重啟後已登入的 dashboard 會失效（需從 LINE 再拿一次登入連結）
+FLASK_SECRET_KEY = (os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or os.getenv("LINE_CHANNEL_SECRET") or "").strip()
+if not FLASK_SECRET_KEY:
+    FLASK_SECRET_KEY = os.urandom(32).hex()
+    print("[WARN] FLASK_SECRET_KEY/SECRET_KEY not set; using random key (sessions reset on restart).", flush=True)
+app.secret_key = FLASK_SECRET_KEY
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# Zeabur 對外通常是 HTTPS；若 PUBLIC_BASE_URL 是 https:// 開頭，就把 cookie 設為 Secure
+try:
+    if (os.getenv("PUBLIC_BASE_URL") or "").lower().startswith("https://"):
+        app.config["SESSION_COOKIE_SECURE"] = True
+except Exception:
+    pass
 LINE_TARGET_USER_ID = os.getenv("LINE_TARGET_USER_ID")  # fallback push target
 
 BOT_NAME = os.getenv("BOT_NAME", "臭寶對話機器人")
@@ -1158,8 +1179,33 @@ def help_quick_text(base_url: str) -> str:
     )
 
 
-def build_help_flex(base_url: str) -> dict:
+def build_help_flex(base_url: str, dash_login_url: str | None = None) -> dict:
     # Flex Message bubble
+    footer_contents = []
+    if dash_login_url:
+        footer_contents.append(
+            {
+                "type": "button",
+                "style": "primary",
+                "action": {"type": "uri", "label": "開啟儀表板", "uri": dash_login_url},
+            }
+        )
+
+    footer_contents.append(
+        {
+            "type": "button",
+            "style": "secondary" if dash_login_url else "primary",
+            "action": {"type": "uri", "label": "開啟使用說明", "uri": f"{base_url}/docs"},
+        }
+    )
+    footer_contents.append(
+        {
+            "type": "button",
+            "style": "secondary",
+            "action": {"type": "message", "label": "貼我精簡版", "text": "help2"},
+        }
+    )
+
     return {
         "type": "bubble",
         "body": {
@@ -1178,6 +1224,7 @@ def build_help_flex(base_url: str) -> dict:
                         {"type": "text", "text": "• 吃藥狀態 / 吃藥紀錄 14", "wrap": True, "size": "sm"},
                         {"type": "text", "text": "• 多零果已玩 / 多零果狀態", "wrap": True, "size": "sm"},
                         {"type": "text", "text": "• 攝影任務 / 任務狀態", "wrap": True, "size": "sm"},
+                        {"type": "text", "text": "• 儀表板（顯示紀念日/吃藥紀錄等）", "wrap": True, "size": "sm"},
                     ],
                 },
             ],
@@ -1186,21 +1233,9 @@ def build_help_flex(base_url: str) -> dict:
             "type": "box",
             "layout": "vertical",
             "spacing": "sm",
-            "contents": [
-                {
-                    "type": "button",
-                    "style": "primary",
-                    "action": {"type": "uri", "label": "開啟使用說明", "uri": f"{base_url}/docs"},
-                },
-                {
-                    "type": "button",
-                    "style": "secondary",
-                    "action": {"type": "message", "label": "貼我精簡版", "text": "help2"},
-                },
-            ],
+            "contents": footer_contents,
         },
     }
-
 
 
 def _cmd(text: str) -> tuple[str, str]:
@@ -2091,17 +2126,20 @@ def docs_plain():
 
 
 
-# ===== Dashboard (private, token-protected) =====
-# 目的：把「LINE 可以問到的資料」用更漂亮的方式呈現在網站上（但避免公開洩漏，所以強制驗證）
+# ===== Dashboard (private) =====
+# 目的：把「LINE 可以問到的資料」用更漂亮的方式呈現在網站上（避免公開洩漏，所以必須登入）。
 #
-# 啟用方式（Zeabur 環境變數）：
-#   DASHBOARD_TOKEN=一段夠長的隨機字串
-# 存取方式：
-#   https://<your-domain>/dash?k=<DASHBOARD_TOKEN>
-# 或帶 Header：X-Dashboard-Token: <DASHBOARD_TOKEN>
+# 登入方式：由 LINE 發放一次性短效 magic link（/dash/login?t=...）
+# - 使用者在 LINE 打：儀表板（或 help 內點「開啟儀表板」）
+# - Bot 會回一個登入連結（短效、一次性）
+# - 網站用該 token 換取 session cookie，並 redirect 到 /dash（URL 不會留下 token）
 #
-# 注意：用 query string 會被 server log / browser history 記錄；若你很在意，可改用 header 或加 Basic Auth。
-
+# Zeabur 建議環境變數：
+#   PUBLIC_BASE_URL=https://<your-domain>
+#   FLASK_SECRET_KEY=一段夠長的隨機字串（或 SECRET_KEY）
+# 可調整：
+#   DASH_MAGIC_TOKEN_TTL_SECONDS=600
+#   DASH_SESSION_TTL_SECONDS=43200
 
 DASH_TEMPLATE = """<!doctype html>
 <html lang="zh-Hant">
@@ -2260,8 +2298,8 @@ DASH_TEMPLATE = """<!doctype html>
     </div>
 
     <div class="mt-6 text-xs text-slate-500">
-      <div>🔒 這是私人頁面：建議設定 DASHBOARD_TOKEN（不要外流）。</div>
-      <div class="mt-1">如果你希望「在 LINE 點按就能打開」又不想用 query token，我可以改成：LINE Flex → 先打 /dash/login 產生一次性短期 token。</div>
+      <div>🔒 這是私人頁面：需要從 LINE 取得一次性登入連結。</div>
+      <div class="mt-1">若你登入失效，回到 LINE 輸入「儀表板」即可重新取得登入連結。</div>
     </div>
   </div>
 </body>
@@ -2269,13 +2307,116 @@ DASH_TEMPLATE = """<!doctype html>
 """
 
 
-def _require_dashboard_auth():
-    token = (os.getenv("DASHBOARD_TOKEN") or "").strip()
-    if not token:
-        abort(403, description="Dashboard is disabled. Please set DASHBOARD_TOKEN.")
-    supplied = (request.args.get("k") or request.headers.get("X-Dashboard-Token") or "").strip()
-    if supplied != token:
-        abort(403)
+
+# ===== Dashboard (private, LINE-issued magic link) =====
+# 目的：把「LINE 可以問到的資料」用更漂亮的方式呈現在網站上（避免公開洩漏，所以必須登入）。
+#
+# 使用方式：
+# - 在 LINE 輸入：儀表板（或 help 內點「開啟儀表板」）
+# - Bot 會回一個「一次性 / 短效」登入連結：/dash/login?t=...
+# - 網站用該 token 換取 session cookie，並 redirect 到 /dash（URL 不會留下 token）
+#
+# Zeabur 建議環境變數：
+#   PUBLIC_BASE_URL=https://<your-domain>
+#   FLASK_SECRET_KEY=一段夠長的隨機字串（或 SECRET_KEY）
+#
+DASH_MAGIC_TOKEN_TTL_SECONDS = int(os.getenv("DASH_MAGIC_TOKEN_TTL_SECONDS", "600"))   # magic link 有效秒數（預設 10 分鐘）
+DASH_SESSION_TTL_SECONDS = int(os.getenv("DASH_SESSION_TTL_SECONDS", "43200"))        # session 有效秒數（預設 12 小時）
+
+DASH_LOGIN_REQUIRED_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }} - 需要登入</title>
+  <style>
+    body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans TC","Helvetica Neue",Arial; margin:0; background:#0b1020; color:#e6e8ef;}
+    .wrap{max-width:820px; margin:0 auto; padding:40px 18px;}
+    .card{background:#131a33; border:1px solid rgba(255,255,255,.08); border-radius:18px; padding:22px;}
+    h1{margin:0 0 10px 0; font-size:22px;}
+    p{margin:8px 0; color:#b8bfd8; line-height:1.6;}
+    .btn{display:inline-block; padding:10px 14px; border-radius:12px; text-decoration:none; background:#2f6bff; color:#fff; font-weight:700;}
+    .muted{font-size:13px; color:#93a0c7;}
+    code{background:rgba(255,255,255,.08); padding:2px 6px; border-radius:8px;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>🔒 需要登入才能看私人資料</h1>
+      <p>請回到 LINE，輸入 <code>儀表板</code>，或打 <code>help</code> 點「開啟儀表板」取得一次性登入連結。</p>
+      <p class="muted">（這樣網址不需要手打 token，也不會長期暴露在瀏覽器紀錄裡）</p>
+      <p style="margin-top:16px;">
+        <a class="btn" href="{{ docs_url }}">回到使用說明</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>"""
+
+DASH_LOGIN_FAIL_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }} - 登入失敗</title>
+  <style>
+    body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans TC","Helvetica Neue",Arial; margin:0; background:#0b1020; color:#e6e8ef;}
+    .wrap{max-width:820px; margin:0 auto; padding:40px 18px;}
+    .card{background:#131a33; border:1px solid rgba(255,255,255,.08); border-radius:18px; padding:22px;}
+    h1{margin:0 0 10px 0; font-size:22px;}
+    p{margin:8px 0; color:#b8bfd8; line-height:1.6;}
+    .btn{display:inline-block; padding:10px 14px; border-radius:12px; text-decoration:none; background:#2f6bff; color:#fff; font-weight:700;}
+    code{background:rgba(255,255,255,.08); padding:2px 6px; border-radius:8px;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>⚠️ 登入連結無效或已過期</h1>
+      <p>請回到 LINE，輸入 <code>儀表板</code> 重新取得一次性登入連結。</p>
+      <p style="margin-top:16px;">
+        <a class="btn" href="{{ docs_url }}">回到使用說明</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+def _dashboard_session_valid() -> bool:
+    try:
+        exp = int(session.get("dash_exp") or 0)
+    except Exception:
+        exp = 0
+    uid = (session.get("dash_uid") or "").strip()
+    return bool(uid) and int(time.time()) < exp
+
+
+def _dash_make_login_url(for_user_id: str) -> str:
+    base_url = get_public_base_url()
+    token = create_dashboard_magic_token(
+        db_path=LOVE_DB_PATH,
+        user_id=for_user_id,
+        ttl_seconds=DASH_MAGIC_TOKEN_TTL_SECONDS,
+    )
+    return f"{base_url}/dash/login?t={token}"
+
+
+def _dash_require_page():
+    if _dashboard_session_valid():
+        return None
+    return render_template_string(
+        DASH_LOGIN_REQUIRED_TEMPLATE,
+        bot_name=BOT_NAME,
+        docs_url=f"{get_public_base_url()}/docs",
+    )
+
+
+def _dash_require_api():
+    if _dashboard_session_valid():
+        return
+    abort(401)
 
 
 def _get_couple_setting(key: str, gf_id: str | None, bf_id: str | None) -> str:
@@ -2438,14 +2579,16 @@ def _build_dashboard_data() -> dict:
 
 @app.route("/dash")
 def dash():
-    _require_dashboard_auth()
+    resp = _dash_require_page()
+    if resp is not None:
+        return resp
     data = _build_dashboard_data()
     return render_template_string(DASH_TEMPLATE, **data)
 
 
 @app.route("/api/dash")
 def api_dash():
-    _require_dashboard_auth()
+    _dash_require_api()
     return jsonify(_build_dashboard_data())
 
 

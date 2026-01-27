@@ -232,6 +232,22 @@ def seed_defaults(db_path: str = DEFAULT_DB):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_med_pills_user_day ON med_pills(user_id, day);")
 
 
+    # dashboard magic login tokens (one-time + short-lived)
+    cur.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS dashboard_magic_tokens (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            used_at INTEGER
+        )
+        '''
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_dash_tokens_user_exp ON dashboard_magic_tokens(user_id, expires_at);")
+
+
+
     conn.commit()
 
     # Light schema migration for older subscriber tables (missing columns)
@@ -790,3 +806,112 @@ def get_media_record(db_path: str, message_id: str) -> Optional[dict]:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+# ===== dashboard magic tokens =====
+def create_dashboard_magic_token(
+    db_path: str,
+    user_id: str,
+    ttl_seconds: int = 600,
+    min_interval_seconds: int = 10,
+) -> str:
+    """Create a short-lived token for /dash/login.
+
+    - Stored server-side (SQLite) with expiry (epoch seconds)
+    - Intended for one-time use (consumed on login)
+    """
+    import secrets
+
+    now = int(time.time())
+    exp = now + int(ttl_seconds)
+
+    conn = _conn(db_path)
+    try:
+        # basic cleanup (avoid unbounded growth)
+        _execute(conn, "DELETE FROM dashboard_magic_tokens WHERE expires_at < ?", (now - 3600,))
+
+        # rate limit: if user requested within min_interval_seconds, reuse latest unexpired unused token
+        row = conn.execute(
+            """
+            SELECT token, created_at, expires_at, used_at
+            FROM dashboard_magic_tokens
+            WHERE user_id=?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        if row:
+            try:
+                created_at = int(row["created_at"])
+                expires_at = int(row["expires_at"])
+                used_at = row["used_at"]
+            except Exception:
+                created_at = 0
+                expires_at = 0
+                used_at = 1
+
+            if (now - created_at) < int(min_interval_seconds) and (used_at is None) and (expires_at > now):
+                return row["token"]
+
+        token = secrets.token_urlsafe(32)
+        _execute(
+            conn,
+            """
+            INSERT INTO dashboard_magic_tokens(token, user_id, created_at, expires_at, used_at)
+            VALUES(?, ?, ?, ?, NULL)
+            """,
+            (token, user_id, now, exp),
+        )
+        conn.commit()
+        return token
+    finally:
+        conn.close()
+
+
+def consume_dashboard_magic_token(db_path: str, token: str) -> Optional[str]:
+    """Consume a magic token (one-time).
+
+    Returns user_id if valid, else None.
+    """
+    token = (token or "").strip()
+    if not token:
+        return None
+
+    now = int(time.time())
+    conn = _conn(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT user_id, expires_at, used_at
+            FROM dashboard_magic_tokens
+            WHERE token=?
+            """,
+            (token,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            expires_at = int(row["expires_at"])
+        except Exception:
+            return None
+        if row["used_at"] is not None:
+            return None
+        if expires_at <= now:
+            return None
+
+        cur = _execute(
+            conn,
+            """
+            UPDATE dashboard_magic_tokens
+            SET used_at=?
+            WHERE token=? AND used_at IS NULL AND expires_at > ?
+            """,
+            (now, token, now),
+        )
+        conn.commit()
+        if getattr(cur, "rowcount", 0) != 1:
+            return None
+        return row["user_id"]
+    finally:
+        conn.close()
