@@ -132,12 +132,12 @@ DOC_SECTIONS = [
     },
     {
         "id": "duo",
-        "title": "多零果（連勝提醒）",
+        "title": "Duolingo（連勝提醒）",
         "items": [
-            {"cmd": "多零果狀態", "desc": "查看提醒是否開啟、今天是否已玩"},
-            {"cmd": "多零果提醒開", "desc": "每天 22:00 起每 10 分鐘提醒一次"},
-            {"cmd": "多零果提醒關", "desc": "關閉提醒"},
-            {"cmd": "多零果已玩", "desc": "今天已完成，今晚不再提醒"},
+            {"cmd": "Duolingo狀態", "desc": "查看提醒是否開啟、今天是否已玩"},
+            {"cmd": "Duolingo提醒開", "desc": "每天 22:00 起每 10 分鐘提醒一次"},
+            {"cmd": "Duolingo提醒關", "desc": "關閉提醒"},
+            {"cmd": "Duolingo已玩", "desc": "今天已完成，今晚不再提醒"},
         ],
         "note": "提醒預設 22:00～23:50；想延長到半夜或改頻率我也可以幫你改成可設定的時間窗。",
     },
@@ -260,7 +260,7 @@ MED_PILL_NUDGE_MINUTES = int(os.getenv("MED_PILL_NUDGE_MINUTES", "30"))    # eve
 MED_PILL_QUIET_HOURS = os.getenv("MED_PILL_QUIET_HOURS", "00:00-07:00")    # set "" to disable
 
 
-# Duolingo streak reminder (多零果)
+# Duolingo streak reminder (Duolingo)
 DUO_REMIND_ENABLED = os.getenv("DUO_REMIND_ENABLED", "1") == "1"
 DUO_REMIND_EVERY_MINUTES = int(os.getenv("DUO_REMIND_EVERY_MINUTES", "10"))
 DUO_REMIND_START_HOUR = int(os.getenv("DUO_REMIND_START_HOUR", "22"))   # 22 = 10pm
@@ -444,7 +444,7 @@ def _in_quiet_hours(now: datetime.datetime) -> bool:
         return now >= start or now <= end
     return start <= now <= end
 
-# ===== Duolingo (多零果) reminder helpers =====
+# ===== Duolingo (Duolingo) reminder helpers =====
 def _get_bool_setting_global(key: str, default: bool) -> bool:
     try:
         v = get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=key)
@@ -1063,12 +1063,12 @@ def help_text() -> str:
         "    - 回覆「吃了 / 吃完 21:30」會自動記錄並通知另一方\n"
         "\n"
         "━━━━━━━━━━━━━━━━\n"
-        "三、多零果提醒\n"
+        "三、Duolingo提醒\n"
         "━━━━━━━━━━━━━━━━\n"
-        "  多零果提醒開 / 多零果提醒關\n"
+        "  Duolingo提醒開 / Duolingo提醒關\n"
         "    - 每晚 22:00 起每 10 分鐘提醒一次\n"
         "\n"
-        "  多零果已玩\n"
+        "  Duolingo已玩\n"
         "    - 暫停今天提醒（明天 22:00 會再開始）\n"
         "\n"
         "━━━━━━━━━━━━━━━━\n"
@@ -1172,7 +1172,7 @@ def help_quick_text(base_url: str) -> str:
         "  我是臭寶 / 我是臭晡晡\n"
         "  加入推播\n"
         "  吃藥狀態 / 吃藥紀錄 14\n"
-        "  多零果狀態 / 多零果已玩\n"
+        "  Duolingo狀態 / Duolingo已玩\n"
         "  攝影任務 / 任務狀態\n"
         "\n"
         "（LINE 內 help 會精簡，完整排版請看網站）"
@@ -1222,7 +1222,7 @@ def build_help_flex(base_url: str, dash_login_url: str | None = None) -> dict:
                     "contents": [
                         {"type": "text", "text": "快速指令", "size": "sm", "weight": "bold"},
                         {"type": "text", "text": "• 吃藥狀態 / 吃藥紀錄 14", "wrap": True, "size": "sm"},
-                        {"type": "text", "text": "• 多零果已玩 / 多零果狀態", "wrap": True, "size": "sm"},
+                        {"type": "text", "text": "• Duolingo已玩 / Duolingo狀態", "wrap": True, "size": "sm"},
                         {"type": "text", "text": "• 攝影任務 / 任務狀態", "wrap": True, "size": "sm"},
                         {"type": "text", "text": "• 儀表板（顯示紀念日/吃藥紀錄等）", "wrap": True, "size": "sm"},
                     ],
@@ -1474,29 +1474,29 @@ def handle_command(user_id: str, text: str) -> str:
                     lines.append(f"{ds} ❌ 未回報")
         return "\n".join(lines)
 
-    # ===== Duolingo (多零果) reminder commands =====
-    if cmd in ("多零果已玩", "已玩多零果", "多零果完成"):
+    # ===== Duolingo (Duolingo) reminder commands =====
+    if cmd in ("Duolingo已玩", "已玩Duolingo", "Duolingo完成"):
         today = _tz_now().date().isoformat()
         set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day", value=today)
-        return "👌 收到～今天就不再提醒多零果了（明天 22:00 會再開始）。"
+        return "👌 收到～今天就不再提醒Duolingo了（明天 22:00 會再開始）。"
 
-    if cmd in ("多零果提醒開", "開多零果提醒", "多零果開"):
+    if cmd in ("Duolingo提醒開", "開Duolingo提醒", "Duolingo開"):
         set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_remind_enabled", value="1")
         set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day", value="")
-        return "✅ 已開啟多零果提醒（每天 22:00 起每 10 分鐘提醒一次）。"
+        return "✅ 已開啟Duolingo提醒（每天 22:00 起每 10 分鐘提醒一次）。"
 
-    if cmd in ("多零果提醒關", "關多零果提醒", "多零果關"):
+    if cmd in ("Duolingo提醒關", "關Duolingo提醒", "Duolingo關"):
         set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_remind_enabled", value="0")
-        return "✅ 已關閉多零果提醒。"
+        return "✅ 已關閉Duolingo提醒。"
 
-    if cmd in ("多零果狀態", "多零果設定"):
+    if cmd in ("Duolingo狀態", "Duolingo設定"):
         enabled = duo_remind_enabled()
         today = _tz_now().date().isoformat()
         done = (get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day") or "").strip()
         return (
-            f"多零果提醒：{'開' if enabled else '關'}\n"
+            f"Duolingo提醒：{'開' if enabled else '關'}\n"
             f"今日已玩：{'是' if done == today else '否'}\n"
-            "（可用：多零果提醒開 / 多零果提醒關 / 多零果已玩）"
+            "（可用：Duolingo提醒開 / Duolingo提醒關 / Duolingo已玩）"
         )
 
     # conversation bridge
@@ -2020,7 +2020,7 @@ def scheduled_med_pill_nudge():
 
 def scheduled_duo_remind():
     """
-    Duolingo (多零果) streak reminder.
+    Duolingo (Duolingo) streak reminder.
     Runs on cron; also gated by DB setting so you can enable/disable by command.
     """
     if not duo_remind_enabled():
@@ -2031,9 +2031,9 @@ def scheduled_duo_remind():
         return
 
     msg = (
-        "🍀 多零果時間！\n"
+        "🍀 Duolingo時間！\n"
         "10 分鐘一次提醒：記得去玩一下，別斷連勝。\n"
-        "（回「多零果已玩」可暫停今天提醒）"
+        "（回「Duolingo已玩」可暫停今天提醒）"
     )
     push_to_couple_text(msg, fallback_user_id=None)
     print("[SCHED][DUO] reminder pushed.", flush=True)
@@ -2067,7 +2067,7 @@ def start_scheduler():
         )
 
     
-    # duolingo reminder (多零果)
+    # duolingo reminder (Duolingo)
     try:
         every = max(1, min(59, int(DUO_REMIND_EVERY_MINUTES)))
         sh = max(0, min(23, int(DUO_REMIND_START_HOUR)))
@@ -2226,7 +2226,7 @@ DASH_TEMPLATE = """<!doctype html>
 
     <div class="mt-4 grid gap-4 md:grid-cols-2">
       <div class="rounded-2xl bg-white shadow p-6">
-        <div class="text-lg font-semibold">🟩 多零果（連勝）</div>
+        <div class="text-lg font-semibold">🟩 Duolingo（連勝）</div>
         <div class="mt-3 flex flex-wrap gap-2">
           {% if duo_enabled %}
             <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">提醒：開</span>
@@ -2244,9 +2244,9 @@ DASH_TEMPLATE = """<!doctype html>
           時間窗：{{ duo_window }}　·　頻率：每 {{ duo_every }} 分鐘
         </div>
         <div class="mt-3 text-sm text-slate-600">
-          指令：<span class="font-mono bg-slate-100 px-2 py-1 rounded">多零果狀態</span> /
-          <span class="font-mono bg-slate-100 px-2 py-1 rounded">多零果已玩</span> /
-          <span class="font-mono bg-slate-100 px-2 py-1 rounded">多零果提醒開/關</span>
+          指令：<span class="font-mono bg-slate-100 px-2 py-1 rounded">Duolingo狀態</span> /
+          <span class="font-mono bg-slate-100 px-2 py-1 rounded">Duolingo已玩</span> /
+          <span class="font-mono bg-slate-100 px-2 py-1 rounded">Duolingo提醒開/關</span>
         </div>
       </div>
 
