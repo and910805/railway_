@@ -6,6 +6,7 @@ import hashlib
 import datetime
 import time
 import mimetypes
+from PIL import Image, ImageOps
 from pathlib import Path
 from typing import Optional
 import re
@@ -251,6 +252,8 @@ DEFAULT_SELF_NICKNAME = os.getenv("SELF_NICKNAME", "臭晡晡")
 # DB & media
 LOVE_DB_PATH = os.getenv("LOVE_DB_PATH", "/data/love.db")
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "/data/media"))
+THUMB_DIR = Path(os.getenv("THUMB_DIR", str(MEDIA_DIR / "_thumbs")))
+
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL", "") or "").rstrip("/")  # e.g. https://xxx.zeabur.app
@@ -827,6 +830,18 @@ def dash_media_src(message_id: str) -> str:
     if MEDIA_ACCESS_TOKEN:
         url += f"?k={MEDIA_ACCESS_TOKEN}"
     return url
+
+
+def dash_thumb_src(message_id: str, w: int = 480) -> str:
+    """Dashboard thumbnails (smaller payload than /media)."""
+    w = max(160, min(1024, int(w)))
+    url = f"/thumb/{message_id}?w={w}"
+    if MEDIA_ACCESS_TOKEN:
+        url += f"&k={MEDIA_ACCESS_TOKEN}"
+    return url
+
+
+
 
 
 def push_to_couple_text(message: str, fallback_user_id: str | None = None):
@@ -2693,6 +2708,8 @@ DASH_GALLERY_TEMPLATE = """<!doctype html>
     <div class="mt-6 rounded-2xl bg-white shadow p-6">
       <div class="flex flex-wrap items-center gap-3">
         <div class="text-sm text-slate-600">顯示筆數（最近）：</div>
+        <div class="text-xs text-slate-500">（使用縮圖加速，點照片可開原圖）</div>
+
         {% for n in [60, 120, 240, 400] %}
           <a class="text-sm underline {% if limit == n %}font-semibold{% endif %}" href="/dash/gallery?group={{ group }}&limit={{ n }}{% if task_id %}&task_id={{ task_id }}{% endif %}">{{ n }}</a>
         {% endfor %}
@@ -2700,6 +2717,14 @@ DASH_GALLERY_TEMPLATE = """<!doctype html>
           <a class="text-sm underline {% if group == 'date' %}font-semibold{% endif %}" href="/dash/gallery?group=date&limit={{ limit }}">依日期</a>
           <a class="text-sm underline {% if group == 'task' %}font-semibold{% endif %}" href="/dash/gallery?group=task&limit={{ limit }}">依任務</a>
         </div>
+      </div>
+
+    </div>
+      {% set prev_offset = offset - limit if offset - limit > 0 else 0 %}
+      <div class="mt-3 flex items-center gap-4 text-sm text-slate-600">
+        <div>Offset：{{ offset }}</div>
+        <a class="underline" href="/dash/gallery?group={{ group }}&limit={{ limit }}&offset={{ prev_offset }}{% if task_id %}&task_id={{ task_id }}{% endif %}">上一頁</a>
+        <a class="underline" href="/dash/gallery?group={{ group }}&limit={{ limit }}&offset={{ offset + limit }}{% if task_id %}&task_id={{ task_id }}{% endif %}">下一頁</a>
       </div>
     </div>
 
@@ -2717,7 +2742,7 @@ DASH_GALLERY_TEMPLATE = """<!doctype html>
           {% for it in items %}
             <div class="masonry-item">
               <div class="rounded-2xl bg-white shadow overflow-hidden">
-                <img class="w-full h-auto" loading="lazy" src="{{ it.src }}" />
+                <a href="{{ it.full }}" target="_blank" rel="noopener"><img class="w-full h-auto" loading="lazy" src="{{ it.thumb }}" /></a>
                 <div class="p-3 text-xs text-slate-600">
                   <div class="flex items-center justify-between gap-2">
                     <div>{{ it.who }} · {{ it.time }}</div>
@@ -2760,7 +2785,7 @@ DASH_GALLERY_TEMPLATE = """<!doctype html>
               {% for it in g.items %}
                 <div class="masonry-item">
                   <div class="rounded-2xl border border-slate-200 overflow-hidden">
-                    <img class="w-full h-auto" loading="lazy" src="{{ it.src }}" />
+                    <a href="{{ it.full }}" target="_blank" rel="noopener"><img class="w-full h-auto" loading="lazy" src="{{ it.thumb }}" /></a>
                     <div class="p-3 text-xs text-slate-600">{{ it.who }} · {{ it.time }}</div>
                   </div>
                 </div>
@@ -3447,6 +3472,7 @@ def dash_tasks():
     )
 
 
+
 @app.route("/dash/gallery")
 def dash_gallery():
     resp = _dash_require_page()
@@ -3454,15 +3480,22 @@ def dash_gallery():
         return resp
 
     base = _build_dashboard_data()
+
     group = (request.args.get("group") or "date").strip().lower()
     if group not in ("date", "task"):
         group = "date"
 
     try:
-        limit = int(request.args.get("limit") or 120)
+        limit = int(request.args.get("limit") or 60)
     except Exception:
-        limit = 120
+        limit = 60
     limit = max(20, min(800, limit))
+
+    try:
+        offset = int(request.args.get("offset") or 0)
+    except Exception:
+        offset = 0
+    offset = max(0, min(200000, offset))
 
     task_id = request.args.get("task_id")
     try:
@@ -3470,77 +3503,95 @@ def dash_gallery():
     except Exception:
         task_id_int = None
 
+    # Resolve gf/bf ids once (avoid N+1 DB calls in gallery)
+    rm = get_role_map_active(db_path=LOVE_DB_PATH)
+    gf_id = rm.get("girlfriend")
+    bf_id = rm.get("boyfriend")
+
     def _who(uid: str | None) -> str:
-        return _safe_name(uid) or (base["gf_name"] if uid == get_role_map_active(db_path=LOVE_DB_PATH).get("girlfriend") else (base["bf_name"] if uid == get_role_map_active(db_path=LOVE_DB_PATH).get("boyfriend") else "unknown"))
+        if not uid:
+            return "unknown"
+        if gf_id and uid == gf_id:
+            return base["gf_name"] or base["gf_label"]
+        if bf_id and uid == bf_id:
+            return base["bf_name"] or base["bf_label"]
+        # fallback (rare)
+        return _safe_name(uid) or "unknown"
 
-    # map message_id -> task_id (if linked)
-    msg_to_task: dict[str, int] = {}
-    try:
-        for it in list_task_media_items(db_path=LOVE_DB_PATH, task_id=None, limit=2000):
-            mid = it.get("message_id")
-            tid = it.get("task_id")
-            if mid and tid:
-                msg_to_task[str(mid)] = int(tid)
-    except Exception:
-        msg_to_task = {}
-
-    media_rows = list_media_records(db_path=LOVE_DB_PATH, limit=limit, offset=0)
-    # only images
-    items = []
-    for r in media_rows:
-        ctype = (r.get("content_type") or "").lower()
-        if ctype and not ctype.startswith("image/"):
-            continue
-        mid = r.get("message_id")
-        if not mid:
-            continue
-        created_at = r.get("created_at") or ""
+    def _time_parts(created_at: str) -> tuple[str, str]:
+        # (day, time)
         try:
             dt = _parse_dt(created_at)
-            day = dt.date().isoformat()
-            tm = dt.strftime("%H:%M")
+            return dt.date().isoformat(), dt.strftime("%H:%M")
         except Exception:
             day = created_at[:10] if created_at else "unknown"
             tm = created_at[11:16] if len(created_at) >= 16 else ""
-        items.append(
-            {
-                "message_id": mid,
-                "day": day,
-                "time": tm,
-                "who": _who(r.get("from_user_id")),
-                "src": dash_media_src(mid),
-                "task_id": msg_to_task.get(str(mid)),
-            }
-        )
+            return day, tm
 
     if group == "date":
+        media_rows = list_media_records_with_task(db_path=LOVE_DB_PATH, limit=limit, offset=offset, task_id=None)
+
+        items: list[dict] = []
+        for r in media_rows:
+            ctype = (r.get("content_type") or "").lower()
+            if ctype and not ctype.startswith("image/"):
+                continue
+            mid = r.get("message_id")
+            if not mid:
+                continue
+            created_at = r.get("created_at") or ""
+            day, tm = _time_parts(created_at)
+            tid = r.get("task_id")
+            try:
+                tid = int(tid) if tid is not None else None
+            except Exception:
+                tid = None
+
+            items.append(
+                {
+                    "message_id": mid,
+                    "day": day,
+                    "time": tm,
+                    "who": _who(r.get("from_user_id")),
+                    "thumb": dash_thumb_src(mid),
+                    "full": dash_media_src(mid),
+                    "task_id": tid,
+                }
+            )
+
         by_day: dict[str, list[dict]] = {}
         for it in items:
             by_day.setdefault(it["day"], []).append(it)
-        # sort days desc
+
         date_groups = sorted(by_day.items(), key=lambda kv: kv[0], reverse=True)
+
         return render_template_string(
             DASH_GALLERY_TEMPLATE,
             **base,
             group=group,
             limit=limit,
+            offset=offset,
             task_id=task_id_int,
             date_groups=date_groups,
             task_groups=[],
         )
 
     # group == task
-    # Build task map (recent tasks) + join items
+    # Recent tasks
     tasks = list_photo_tasks(db_path=LOVE_DB_PATH, status=None, limit=200)
-    # decorate
-    decorated = {}
+
+    decorated: dict[int, dict] = {}
     for t in tasks:
+        try:
+            tid = int(t["id"])
+        except Exception:
+            continue
         assign_role = t.get("assign_role") or ""
         assign_label = base["gf_label"] if assign_role == "girlfriend" else (base["bf_label"] if assign_role == "boyfriend" else assign_role)
         created_by = t.get("created_by") or ""
         created_by_name = _safe_name(created_by) or "system"
-        decorated[int(t["id"])] = {
-            "id": int(t["id"]),
+        decorated[tid] = {
+            "id": tid,
             "assign_role": assign_role,
             "assign_label": assign_label,
             "text": t.get("text") or "",
@@ -3552,66 +3603,115 @@ def dash_gallery():
             "done_at": t.get("done_at") or "",
         }
 
-    # join table: task_media -> media
     joined = list_task_media_items(db_path=LOVE_DB_PATH, task_id=task_id_int, limit=2000)
+
     by_task: dict[int, list[dict]] = {}
     for it in joined:
         tid = it.get("task_id")
         mid = it.get("message_id")
         if not tid or not mid:
             continue
-        tid = int(tid)
-        if task_id_int is not None and tid != task_id_int:
+        try:
+            tid_int = int(tid)
+        except Exception:
             continue
+
         created_at = it.get("created_at") or ""
         try:
             dt = _parse_dt(created_at)
             tm = dt.strftime("%Y-%m-%d %H:%M")
         except Exception:
             tm = created_at[:16] if created_at else ""
-        by_task.setdefault(tid, []).append(
+
+        by_task.setdefault(tid_int, []).append(
             {
                 "message_id": mid,
                 "time": tm,
                 "who": _who(it.get("from_user_id")),
-                "src": dash_media_src(mid),
+                "thumb": dash_thumb_src(mid),
+                "full": dash_media_src(mid),
             }
         )
 
-    # order tasks: done desc, others, by id desc, and filter if task_id specified
     task_ids = [task_id_int] if task_id_int is not None else sorted(decorated.keys(), reverse=True)
+
     task_groups = []
     for tid in task_ids:
         if tid is None or tid not in decorated:
             continue
-        task_groups.append(
-            {
-                "task": decorated[tid],
-                "items": by_task.get(tid, []),
-            }
-        )
+        task_groups.append({"task": decorated[tid], "items": by_task.get(tid, [])})
 
     return render_template_string(
         DASH_GALLERY_TEMPLATE,
         **base,
         group=group,
         limit=limit,
+        offset=offset,
         task_id=task_id_int,
         date_groups=[],
         task_groups=task_groups,
     )
 
 
-@app.route("/api/dash")
-def api_dash():
-    _dash_require_api()
-    return jsonify(_build_dashboard_data())
 
+@app.route("/thumb/<message_id>")
+def thumb(message_id: str):
+    # auth
+    if MEDIA_ACCESS_TOKEN:
+        if request.args.get("k", "") != MEDIA_ACCESS_TOKEN:
+            abort(403)
 
+    try:
+        w = int(request.args.get("w") or 480)
+    except Exception:
+        w = 480
+    w = max(160, min(1024, w))
 
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok"})
+    rec = get_media_record(db_path=LOVE_DB_PATH, message_id=message_id)
+    if not rec:
+        abort(404)
+
+    filepath = MEDIA_DIR / rec["filename"]
+    if not filepath.exists():
+        abort(404)
+
+    THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    thumb_path = THUMB_DIR / f"{message_id}_{w}.jpg"
+
+    # regen if missing or source updated
+    try:
+        if (not thumb_path.exists()) or (thumb_path.stat().st_mtime < filepath.stat().st_mtime):
+            img = Image.open(filepath)
+            try:
+                img = ImageOps.exif_transpose(img)
+            except Exception:
+                pass
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            elif img.mode == "L":
+                img = img.convert("RGB")
+
+            if img.width > w:
+                h = max(1, int(img.height * (w / float(img.width))))
+                img = img.resize((w, h), Image.LANCZOS)
+
+            tmp = thumb_path.with_suffix(".tmp")
+            img.save(tmp, format="JPEG", quality=78, optimize=True)
+            os.replace(tmp, thumb_path)
+    except Exception:
+        # fallback to original if thumbnail generation fails
+        ctype = rec.get("content_type") or mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
+        resp = send_file(filepath, mimetype=ctype, as_attachment=False, conditional=True, max_age=31536000)
+        resp.cache_control.private = True
+        resp.cache_control.max_age = 31536000
+        resp.cache_control.immutable = True
+        return resp
+
+    resp = send_file(thumb_path, mimetype="image/jpeg", as_attachment=False, conditional=True, max_age=31536000)
+    resp.cache_control.private = True
+    resp.cache_control.max_age = 31536000
+    resp.cache_control.immutable = True
+    return resp
 
 
 @app.route("/media/<message_id>")
@@ -3629,7 +3729,11 @@ def media(message_id: str):
         abort(404)
 
     ctype = rec.get("content_type") or mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
-    return send_file(filepath, mimetype=ctype, as_attachment=False)
+    resp = send_file(filepath, mimetype=ctype, as_attachment=False, conditional=True, max_age=31536000)
+    resp.cache_control.private = True
+    resp.cache_control.max_age = 31536000
+    resp.cache_control.immutable = True
+    return resp
 
 
 @app.route("/webhook", methods=["POST", "GET"])

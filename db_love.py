@@ -195,7 +195,10 @@ def seed_defaults(db_path: str = DEFAULT_DB):
     )
 
 
-    # task_media (link photo_tasks <-> media, supports multiple photos per task)
+    
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_media_created_at ON media(created_at DESC);")
+
+# task_media (link photo_tasks <-> media, supports multiple photos per task)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS task_media (
@@ -993,6 +996,42 @@ def list_media_records(db_path: str, limit: int = 500, offset: int = 0) -> list[
     finally:
         conn.close()
 
+
+
+
+def list_media_records_with_task(db_path: str, limit: int = 500, offset: int = 0, task_id: int | None = None) -> list[dict]:
+    """
+    Media list with optional task_id via LEFT JOIN task_media.
+    Used by /dash/gallery to avoid extra queries.
+    """
+    conn = _conn(db_path)
+    try:
+        if task_id is not None:
+            rows = conn.execute(
+                """
+                SELECT m.message_id, m.filename, m.content_type, m.from_user_id, m.created_at, tm.task_id
+                FROM media m
+                LEFT JOIN task_media tm ON tm.message_id = m.message_id
+                WHERE tm.task_id = ?
+                ORDER BY m.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (int(task_id), limit, offset),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT m.message_id, m.filename, m.content_type, m.from_user_id, m.created_at, tm.task_id
+                FROM media m
+                LEFT JOIN task_media tm ON tm.message_id = m.message_id
+                ORDER BY m.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 # ===== dashboard magic tokens =====
