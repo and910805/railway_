@@ -194,6 +194,22 @@ def seed_defaults(db_path: str = DEFAULT_DB):
         """
     )
 
+
+    # task_media (link photo_tasks <-> media, supports multiple photos per task)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_media (
+            task_id INTEGER NOT NULL,
+            message_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(task_id, message_id),
+            FOREIGN KEY(task_id) REFERENCES photo_tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(message_id) REFERENCES media(message_id) ON DELETE CASCADE
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_task_media_task ON task_media(task_id, created_at);")
+
     # dedupe table (avoid LINE retries creating duplicate side-effects)
     cur.execute(
         """
@@ -267,6 +283,33 @@ def seed_defaults(db_path: str = DEFAULT_DB):
         conn.commit()
     except Exception:
         # ignore migration failures; runtime functions are defensive too
+        pass
+
+    # Light schema migration for older photo_tasks/media tables (missing columns)
+    try:
+        now = _tz_now_iso()
+        cols = _table_cols(conn, "photo_tasks")
+        if "status" not in cols:
+            conn.execute("ALTER TABLE photo_tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'open';")
+        if "created_by" not in cols:
+            conn.execute("ALTER TABLE photo_tasks ADD COLUMN created_by TEXT;")
+        if "expires_at" not in cols:
+            conn.execute("ALTER TABLE photo_tasks ADD COLUMN expires_at TEXT;")
+            conn.execute("UPDATE photo_tasks SET expires_at=? WHERE expires_at IS NULL;", (now,))
+        if "done_at" not in cols:
+            conn.execute("ALTER TABLE photo_tasks ADD COLUMN done_at TEXT;")
+        conn.commit()
+    except Exception:
+        pass
+
+    try:
+        cols = _table_cols(conn, "media")
+        if "content_type" not in cols:
+            conn.execute("ALTER TABLE media ADD COLUMN content_type TEXT;")
+        if "from_user_id" not in cols:
+            conn.execute("ALTER TABLE media ADD COLUMN from_user_id TEXT;")
+        conn.commit()
+    except Exception:
         pass
 
     # seed default love lines / date ideas if empty
@@ -728,12 +771,126 @@ def list_open_photo_tasks(db_path: str, limit: int = 10) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def claim_latest_open_task_for_role(db_path: str, role: str, expire_minutes: int = 180):
+def expire_open_photo_tasks(db_path: str) -> int:
+    """
+    Mark open photo_tasks as expired if expires_at < now.
+    Returns number of tasks changed.
+    """
+    conn = _conn(db_path)
+    try:
+        now = datetime.datetime.now(_tz())
+        rows = conn.execute(
+            "SELECT id, expires_at FROM photo_tasks WHERE status='open' ORDER BY id DESC LIMIT 500"
+        ).fetchall()
+        expired_ids: list[int] = []
+        for r in rows:
+            exp_raw = r["expires_at"]
+            if not exp_raw:
+                continue
+            try:
+                exp = _parse_dt_any(exp_raw)
+            except Exception:
+                continue
+            if exp < now:
+                expired_ids.append(int(r["id"]))
+
+        for tid in expired_ids:
+            _execute(conn, "UPDATE photo_tasks SET status='expired' WHERE id=?", (tid,))
+        conn.commit()
+        return len(expired_ids)
+    finally:
+        conn.close()
+
+
+def list_photo_tasks(db_path: str, status: str | None = None, limit: int = 200) -> list[dict]:
+    """
+    List photo_tasks (optionally by status). Sorted newest first.
+    """
+    conn = _conn(db_path)
+    try:
+        if status:
+            rows = conn.execute(
+                """
+                SELECT id, assign_role, text, status, created_by, created_at, expires_at, done_at
+                FROM photo_tasks
+                WHERE status=?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (status, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, assign_role, text, status, created_by, created_at, expires_at, done_at
+                FROM photo_tasks
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def attach_media_to_task(db_path: str, task_id: int, message_id: str):
+    conn = _conn(db_path)
+    try:
+        _execute(
+            conn,
+            "INSERT OR IGNORE INTO task_media(task_id, message_id, created_at) VALUES(?, ?, ?)",
+            (int(task_id), str(message_id), _tz_now_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_task_media_items(db_path: str, task_id: int | None = None, limit: int = 1000) -> list[dict]:
+    """
+    Join task_media -> media for gallery rendering.
+    """
+    conn = _conn(db_path)
+    try:
+        if task_id is not None:
+            rows = conn.execute(
+                """
+                SELECT tm.task_id, m.message_id, m.filename, m.content_type, m.from_user_id, m.created_at
+                FROM task_media tm
+                JOIN media m ON m.message_id = tm.message_id
+                WHERE tm.task_id=?
+                ORDER BY m.created_at DESC
+                LIMIT ?
+                """,
+                (int(task_id), limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT tm.task_id, m.message_id, m.filename, m.content_type, m.from_user_id, m.created_at
+                FROM task_media tm
+                JOIN media m ON m.message_id = tm.message_id
+                ORDER BY m.created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+
+def claim_latest_open_task_for_role(db_path: str, role: str, expire_minutes: int = 180, message_id: str | None = None):
+    """
+    Claim the latest open task for the role, mark it done, and optionally attach the incoming media message_id.
+    Also sweeps a few recent open tasks to expired if already past expires_at.
+    """
     conn = _conn(db_path)
     try:
         now = datetime.datetime.now(_tz())
 
-        # 抓多筆，順便把過期的 open 清成 expired，避免永遠卡在「最新一筆已過期」的狀態
         rows = conn.execute(
             """
             SELECT id, text, expires_at
@@ -766,6 +923,18 @@ def claim_latest_open_task_for_role(db_path: str, role: str, expire_minutes: int
             "UPDATE photo_tasks SET status='done', done_at=? WHERE id=?",
             (_tz_now_iso(), picked["id"]),
         )
+
+        if message_id:
+            try:
+                _execute(
+                    conn,
+                    "INSERT OR IGNORE INTO task_media(task_id, message_id, created_at) VALUES(?, ?, ?)",
+                    (int(picked["id"]), str(message_id), _tz_now_iso()),
+                )
+            except Exception:
+                # If the table is missing (old DB) or FK mismatch, ignore.
+                pass
+
         conn.commit()
         return {"id": picked["id"], "text": picked["text"], "expires_at": picked["expires_at"]}
     finally:
@@ -806,6 +975,24 @@ def get_media_record(db_path: str, message_id: str) -> Optional[dict]:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def list_media_records(db_path: str, limit: int = 500, offset: int = 0) -> list[dict]:
+    conn = _conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT message_id, filename, content_type, from_user_id, created_at
+            FROM media
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
 
 
 # ===== dashboard magic tokens =====

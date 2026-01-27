@@ -49,6 +49,10 @@ from db_love import (
     # photo tasks
     create_photo_task,
     list_open_photo_tasks,
+    expire_open_photo_tasks,
+    list_photo_tasks,
+    list_task_media_items,
+    list_media_records,
     claim_latest_open_task_for_role,
     # media
     save_media_record,
@@ -815,6 +819,16 @@ def build_media_url(message_id: str) -> str | None:
     return url
 
 
+def dash_media_src(message_id: str) -> str:
+    """
+    Browser-side media URL (relative), includes MEDIA_ACCESS_TOKEN if enabled.
+    """
+    url = f"/media/{message_id}"
+    if MEDIA_ACCESS_TOKEN:
+        url += f"?k={MEDIA_ACCESS_TOKEN}"
+    return url
+
+
 def push_to_couple_text(message: str, fallback_user_id: str | None = None):
     ids = [x for x in get_couple_user_ids(db_path=LOVE_DB_PATH) if x]
     if len(ids) >= 2:
@@ -1459,7 +1473,7 @@ def forward_image_to_other_party(sender_user_id: str, sender_name: str, message_
 
     # match latest open task for sender_role
     matched = claim_latest_open_task_for_role(
-        db_path=LOVE_DB_PATH, role=sender_role, expire_minutes=PHOTO_TASK_EXPIRE_MIN
+        db_path=LOVE_DB_PATH, role=sender_role, expire_minutes=PHOTO_TASK_EXPIRE_MIN, message_id=message_id
     )
     task_note = ""
     if matched:
@@ -2376,7 +2390,7 @@ DASH_TEMPLATE = """<!doctype html>
     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
       <div>
         <h1 class="text-2xl md:text-3xl font-bold">{{ bot_name }}｜私人儀表板</h1>
-        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a>　·　<a class="underline" href="/dash/settings">設定中心</a></div>
+        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a>　·　<a class="underline" href="/dash/settings">設定中心</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a></div>
       </div>
       <div class="text-sm text-slate-600">
         <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
@@ -2528,6 +2542,240 @@ DASH_TEMPLATE = """<!doctype html>
 </html>
 """
 
+
+DASH_TASKS_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }}｜任務牆</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-6xl mx-auto px-4 py-10">
+    <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+      <div>
+        <h1 class="text-2xl md:text-3xl font-bold">📌 任務牆</h1>
+        <div class="mt-1 text-sm text-slate-600">
+          更新時間：{{ updated_at }}
+          · <a class="underline" href="/dash">回儀表板</a>
+          · <a class="underline" href="/dash/settings">設定中心</a>
+          · <a class="underline" href="/dash/gallery">相簿</a>
+        </div>
+      </div>
+      <div class="text-sm text-slate-600">
+        <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
+      </div>
+    </div>
+
+    <div class="mt-6 rounded-2xl bg-white shadow p-6">
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="text-sm text-slate-600">Open：<span class="font-semibold text-slate-900">{{ open_tasks|length }}</span></div>
+        <div class="text-sm text-slate-600">Expired：<span class="font-semibold text-slate-900">{{ expired_tasks|length }}</span></div>
+        <div class="text-sm text-slate-600">Done：<span class="font-semibold text-slate-900">{{ done_tasks|length }}</span></div>
+        {% if expired_sweep_count %}
+        <div class="ml-auto text-xs text-slate-500">（本次自動標記過期：{{ expired_sweep_count }}）</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="mt-6 grid gap-4 lg:grid-cols-3">
+      <!-- OPEN -->
+      <div class="rounded-2xl bg-white shadow p-5">
+        <div class="text-lg font-semibold">🟢 Open</div>
+        <div class="mt-3 space-y-3">
+          {% if not open_tasks %}
+            <div class="text-sm text-slate-600">目前沒有 open 任務。</div>
+          {% endif %}
+          {% for t in open_tasks %}
+            <div class="rounded-xl border border-slate-200 p-4">
+              <div class="flex items-start justify-between gap-3">
+                <div class="font-semibold">#{{ t.id }} · 派給 {{ t.assign_label }}</div>
+                <span class="text-xs rounded-full bg-emerald-50 text-emerald-700 px-2 py-1">open</span>
+              </div>
+              <div class="mt-2 text-slate-800">{{ t.text }}</div>
+              <div class="mt-2 text-xs text-slate-600">
+                派發：{{ t.created_by_name }} · 建立：{{ t.created_at }} · 到期：{{ t.expires_at }}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- EXPIRED -->
+      <div class="rounded-2xl bg-white shadow p-5">
+        <div class="text-lg font-semibold">🟠 Expired</div>
+        <div class="mt-3 space-y-3">
+          {% if not expired_tasks %}
+            <div class="text-sm text-slate-600">目前沒有 expired 任務。</div>
+          {% endif %}
+          {% for t in expired_tasks %}
+            <div class="rounded-xl border border-slate-200 p-4">
+              <div class="flex items-start justify-between gap-3">
+                <div class="font-semibold">#{{ t.id }} · 派給 {{ t.assign_label }}</div>
+                <span class="text-xs rounded-full bg-amber-50 text-amber-700 px-2 py-1">expired</span>
+              </div>
+              <div class="mt-2 text-slate-800">{{ t.text }}</div>
+              <div class="mt-2 text-xs text-slate-600">
+                派發：{{ t.created_by_name }} · 建立：{{ t.created_at }} · 到期：{{ t.expires_at }}
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- DONE -->
+      <div class="rounded-2xl bg-white shadow p-5">
+        <div class="text-lg font-semibold">✅ Done</div>
+        <div class="mt-3 space-y-3">
+          {% if not done_tasks %}
+            <div class="text-sm text-slate-600">目前沒有 done 任務。</div>
+          {% endif %}
+          {% for t in done_tasks %}
+            <div class="rounded-xl border border-slate-200 p-4">
+              <div class="flex items-start justify-between gap-3">
+                <div class="font-semibold">#{{ t.id }} · 派給 {{ t.assign_label }}</div>
+                <span class="text-xs rounded-full bg-sky-50 text-sky-700 px-2 py-1">done</span>
+              </div>
+              <div class="mt-2 text-slate-800">{{ t.text }}</div>
+              <div class="mt-2 text-xs text-slate-600">
+                派發：{{ t.created_by_name }} · 建立：{{ t.created_at }} · 完成：{{ t.done_at or "-" }}
+              </div>
+              <div class="mt-3">
+                <a class="text-sm underline" href="/dash/gallery?group=task&task_id={{ t.id }}">看這個任務的照片</a>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-10 text-xs text-slate-500">
+      註：任務在到期前上傳照片，會自動「交作業」並標記 done；超過到期會自動標記 expired。
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+DASH_GALLERY_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }}｜相簿</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .masonry { column-gap: 1rem; column-count: 2; }
+    @media (min-width: 768px) { .masonry { column-count: 3; } }
+    @media (min-width: 1024px) { .masonry { column-count: 4; } }
+    .masonry-item { break-inside: avoid; margin-bottom: 1rem; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-6xl mx-auto px-4 py-10">
+    <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+      <div>
+        <h1 class="text-2xl md:text-3xl font-bold">🖼️ 相簿</h1>
+        <div class="mt-1 text-sm text-slate-600">
+          更新時間：{{ updated_at }}
+          · <a class="underline" href="/dash">回儀表板</a>
+          · <a class="underline" href="/dash/settings">設定中心</a>
+          · <a class="underline" href="/dash/tasks">任務牆</a>
+        </div>
+      </div>
+      <div class="text-sm text-slate-600">
+        <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
+      </div>
+    </div>
+
+    <div class="mt-6 rounded-2xl bg-white shadow p-6">
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="text-sm text-slate-600">顯示筆數（最近）：</div>
+        {% for n in [60, 120, 240, 400] %}
+          <a class="text-sm underline {% if limit == n %}font-semibold{% endif %}" href="/dash/gallery?group={{ group }}&limit={{ n }}{% if task_id %}&task_id={{ task_id }}{% endif %}">{{ n }}</a>
+        {% endfor %}
+        <div class="ml-auto flex items-center gap-3">
+          <a class="text-sm underline {% if group == 'date' %}font-semibold{% endif %}" href="/dash/gallery?group=date&limit={{ limit }}">依日期</a>
+          <a class="text-sm underline {% if group == 'task' %}font-semibold{% endif %}" href="/dash/gallery?group=task&limit={{ limit }}">依任務</a>
+        </div>
+      </div>
+    </div>
+
+    {% if group == 'date' %}
+      {% if not date_groups %}
+        <div class="mt-6 text-sm text-slate-600">目前沒有照片。</div>
+      {% endif %}
+
+      {% for day, items in date_groups %}
+        <div class="mt-8 flex items-end justify-between">
+          <div class="text-lg font-semibold">{{ day }}</div>
+          <div class="text-sm text-slate-600">{{ items|length }} 張</div>
+        </div>
+        <div class="mt-4 masonry">
+          {% for it in items %}
+            <div class="masonry-item">
+              <div class="rounded-2xl bg-white shadow overflow-hidden">
+                <img class="w-full h-auto" loading="lazy" src="{{ it.src }}" />
+                <div class="p-3 text-xs text-slate-600">
+                  <div class="flex items-center justify-between gap-2">
+                    <div>{{ it.who }} · {{ it.time }}</div>
+                    {% if it.task_id %}
+                      <a class="underline" href="/dash/gallery?group=task&task_id={{ it.task_id }}">任務 #{{ it.task_id }}</a>
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% endfor %}
+    {% else %}
+      {% if task_id %}
+        <div class="mt-6 text-sm text-slate-600">已篩選任務：<span class="font-semibold">#{{ task_id }}</span>（<a class="underline" href="/dash/gallery?group=task&limit={{ limit }}">清除篩選</a>）</div>
+      {% endif %}
+
+      {% if not task_groups %}
+        <div class="mt-6 text-sm text-slate-600">目前沒有「任務→照片」關聯資料。派一個攝影任務後，在到期內上傳照片，就會自動掛到任務底下。</div>
+      {% endif %}
+
+      {% for g in task_groups %}
+        <div id="task-{{ g.task.id }}" class="mt-10 rounded-2xl bg-white shadow p-6">
+          <div class="flex flex-col gap-1 md:flex-row md:items-start md:justify-between">
+            <div>
+              <div class="text-lg font-semibold">#{{ g.task.id }} · {{ g.task.status }} · 派給 {{ g.task.assign_label }}</div>
+              <div class="mt-1 text-slate-800">{{ g.task.text }}</div>
+              <div class="mt-2 text-xs text-slate-600">
+                派發：{{ g.task.created_by_name }} · 建立：{{ g.task.created_at }} · 到期：{{ g.task.expires_at }} · 完成：{{ g.task.done_at or "-" }}
+              </div>
+            </div>
+            <div class="mt-3 md:mt-0 text-sm">
+              <a class="underline" href="/dash/tasks">回任務牆</a>
+            </div>
+          </div>
+
+          {% if g.items %}
+            <div class="mt-5 masonry">
+              {% for it in g.items %}
+                <div class="masonry-item">
+                  <div class="rounded-2xl border border-slate-200 overflow-hidden">
+                    <img class="w-full h-auto" loading="lazy" src="{{ it.src }}" />
+                    <div class="p-3 text-xs text-slate-600">{{ it.who }} · {{ it.time }}</div>
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="mt-4 text-sm text-slate-600">這個任務目前沒有掛到照片（可能是舊資料、或交作業時尚未啟用關聯）。</div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    {% endif %}
+  </div>
+</body>
+</html>
+"""
 DASH_SETTINGS_TEMPLATE = """<!doctype html>
 <html lang="zh-Hant">
 <head>
@@ -2541,7 +2789,7 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
     <div class="flex items-center justify-between">
       <div>
         <div class="text-2xl font-bold">{{ bot_name }} · 設定中心</div>
-        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="/dash">回儀表板</a></div>
+        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="/dash">回儀表板</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a></div>
       </div>
       <div class="text-sm text-slate-600">
         <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
@@ -3147,6 +3395,211 @@ def dash():
         return resp
     data = _build_dashboard_data()
     return render_template_string(DASH_TEMPLATE, **data)
+
+
+@app.route("/dash/tasks")
+def dash_tasks():
+    resp = _dash_require_page()
+    if resp is not None:
+        return resp
+
+    base = _build_dashboard_data()
+    # sweep expired open tasks (idempotent)
+    try:
+        sweep = expire_open_photo_tasks(db_path=LOVE_DB_PATH)
+    except Exception:
+        sweep = 0
+
+    def _decorate(tasks: list[dict]) -> list[dict]:
+        out = []
+        for t in tasks:
+            assign_role = t.get("assign_role") or ""
+            assign_label = base["gf_label"] if assign_role == "girlfriend" else (base["bf_label"] if assign_role == "boyfriend" else assign_role)
+            created_by = t.get("created_by") or ""
+            created_by_name = _safe_name(created_by) or "system"
+            out.append(
+                {
+                    "id": t.get("id"),
+                    "assign_role": assign_role,
+                    "assign_label": assign_label,
+                    "text": t.get("text") or "",
+                    "status": t.get("status") or "",
+                    "created_by": created_by,
+                    "created_by_name": created_by_name,
+                    "created_at": t.get("created_at") or "",
+                    "expires_at": t.get("expires_at") or "",
+                    "done_at": t.get("done_at") or "",
+                }
+            )
+        return out
+
+    open_tasks = _decorate(list_photo_tasks(db_path=LOVE_DB_PATH, status="open", limit=120))
+    expired_tasks = _decorate(list_photo_tasks(db_path=LOVE_DB_PATH, status="expired", limit=120))
+    done_tasks = _decorate(list_photo_tasks(db_path=LOVE_DB_PATH, status="done", limit=120))
+
+    return render_template_string(
+        DASH_TASKS_TEMPLATE,
+        **base,
+        open_tasks=open_tasks,
+        expired_tasks=expired_tasks,
+        done_tasks=done_tasks,
+        expired_sweep_count=sweep,
+    )
+
+
+@app.route("/dash/gallery")
+def dash_gallery():
+    resp = _dash_require_page()
+    if resp is not None:
+        return resp
+
+    base = _build_dashboard_data()
+    group = (request.args.get("group") or "date").strip().lower()
+    if group not in ("date", "task"):
+        group = "date"
+
+    try:
+        limit = int(request.args.get("limit") or 120)
+    except Exception:
+        limit = 120
+    limit = max(20, min(800, limit))
+
+    task_id = request.args.get("task_id")
+    try:
+        task_id_int = int(task_id) if task_id else None
+    except Exception:
+        task_id_int = None
+
+    def _who(uid: str | None) -> str:
+        return _safe_name(uid) or (base["gf_name"] if uid == get_role_map_active(db_path=LOVE_DB_PATH).get("girlfriend") else (base["bf_name"] if uid == get_role_map_active(db_path=LOVE_DB_PATH).get("boyfriend") else "unknown"))
+
+    # map message_id -> task_id (if linked)
+    msg_to_task: dict[str, int] = {}
+    try:
+        for it in list_task_media_items(db_path=LOVE_DB_PATH, task_id=None, limit=2000):
+            mid = it.get("message_id")
+            tid = it.get("task_id")
+            if mid and tid:
+                msg_to_task[str(mid)] = int(tid)
+    except Exception:
+        msg_to_task = {}
+
+    media_rows = list_media_records(db_path=LOVE_DB_PATH, limit=limit, offset=0)
+    # only images
+    items = []
+    for r in media_rows:
+        ctype = (r.get("content_type") or "").lower()
+        if ctype and not ctype.startswith("image/"):
+            continue
+        mid = r.get("message_id")
+        if not mid:
+            continue
+        created_at = r.get("created_at") or ""
+        try:
+            dt = _parse_dt(created_at)
+            day = dt.date().isoformat()
+            tm = dt.strftime("%H:%M")
+        except Exception:
+            day = created_at[:10] if created_at else "unknown"
+            tm = created_at[11:16] if len(created_at) >= 16 else ""
+        items.append(
+            {
+                "message_id": mid,
+                "day": day,
+                "time": tm,
+                "who": _who(r.get("from_user_id")),
+                "src": dash_media_src(mid),
+                "task_id": msg_to_task.get(str(mid)),
+            }
+        )
+
+    if group == "date":
+        by_day: dict[str, list[dict]] = {}
+        for it in items:
+            by_day.setdefault(it["day"], []).append(it)
+        # sort days desc
+        date_groups = sorted(by_day.items(), key=lambda kv: kv[0], reverse=True)
+        return render_template_string(
+            DASH_GALLERY_TEMPLATE,
+            **base,
+            group=group,
+            limit=limit,
+            task_id=task_id_int,
+            date_groups=date_groups,
+            task_groups=[],
+        )
+
+    # group == task
+    # Build task map (recent tasks) + join items
+    tasks = list_photo_tasks(db_path=LOVE_DB_PATH, status=None, limit=200)
+    # decorate
+    decorated = {}
+    for t in tasks:
+        assign_role = t.get("assign_role") or ""
+        assign_label = base["gf_label"] if assign_role == "girlfriend" else (base["bf_label"] if assign_role == "boyfriend" else assign_role)
+        created_by = t.get("created_by") or ""
+        created_by_name = _safe_name(created_by) or "system"
+        decorated[int(t["id"])] = {
+            "id": int(t["id"]),
+            "assign_role": assign_role,
+            "assign_label": assign_label,
+            "text": t.get("text") or "",
+            "status": t.get("status") or "",
+            "created_by": created_by,
+            "created_by_name": created_by_name,
+            "created_at": t.get("created_at") or "",
+            "expires_at": t.get("expires_at") or "",
+            "done_at": t.get("done_at") or "",
+        }
+
+    # join table: task_media -> media
+    joined = list_task_media_items(db_path=LOVE_DB_PATH, task_id=task_id_int, limit=2000)
+    by_task: dict[int, list[dict]] = {}
+    for it in joined:
+        tid = it.get("task_id")
+        mid = it.get("message_id")
+        if not tid or not mid:
+            continue
+        tid = int(tid)
+        if task_id_int is not None and tid != task_id_int:
+            continue
+        created_at = it.get("created_at") or ""
+        try:
+            dt = _parse_dt(created_at)
+            tm = dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            tm = created_at[:16] if created_at else ""
+        by_task.setdefault(tid, []).append(
+            {
+                "message_id": mid,
+                "time": tm,
+                "who": _who(it.get("from_user_id")),
+                "src": dash_media_src(mid),
+            }
+        )
+
+    # order tasks: done desc, others, by id desc, and filter if task_id specified
+    task_ids = [task_id_int] if task_id_int is not None else sorted(decorated.keys(), reverse=True)
+    task_groups = []
+    for tid in task_ids:
+        if tid is None or tid not in decorated:
+            continue
+        task_groups.append(
+            {
+                "task": decorated[tid],
+                "items": by_task.get(tid, []),
+            }
+        )
+
+    return render_template_string(
+        DASH_GALLERY_TEMPLATE,
+        **base,
+        group=group,
+        limit=limit,
+        task_id=task_id_int,
+        date_groups=[],
+        task_groups=task_groups,
+    )
 
 
 @app.route("/api/dash")
