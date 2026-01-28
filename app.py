@@ -118,6 +118,8 @@ DISCORD_ALLOWED_CHANNEL_IDS = set(
     [s.strip() for s in (os.getenv("DISCORD_ALLOWED_CHANNEL_IDS") or "").split(",") if s.strip()]
 )
 
+DISCORD_DEBUG = os.getenv("DISCORD_DEBUG", "0") == "1"
+
 
 # Discord push (broadcast) targets for scheduled notifications
 # - DISCORD_PUSH_CHANNEL_IDS / DISCORD_PUSH_CHANNEL_ID: comma-separated channel IDs for broadcast pushes
@@ -1071,6 +1073,31 @@ def discord_send_text(to_user_id: str, text: str):
     fut = asyncio.run_coroutine_threadsafe(_discord_send_text_async(uid, text), _discord_loop)
     return fut.result(timeout=15)
 
+
+async def _discord_send_channel_text_async(channel_id_int: int, text: str):
+    import discord  # local import
+    global _discord_client
+    if not _discord_client:
+        raise RuntimeError("Discord client not ready")
+
+    ch = _discord_client.get_channel(channel_id_int)
+    if ch is None:
+        ch = await _discord_client.fetch_channel(channel_id_int)
+    for chunk in _chunk_text(text):
+        if chunk.strip() == "":
+            continue
+        await ch.send(chunk)
+
+def discord_send_channel_text(channel_id: str, text: str):
+    global _discord_loop
+    if not _discord_enabled():
+        raise RuntimeError("Discord bridge disabled")
+    if not _discord_loop or not _discord_ready.is_set():
+        raise RuntimeError("Discord loop not ready")
+    cid = int(str(channel_id))
+    fut = asyncio.run_coroutine_threadsafe(_discord_send_channel_text_async(cid, text), _discord_loop)
+    return fut.result(timeout=15)
+
 def start_discord_bot():
     """Start Discord bot in a background thread (non-blocking).
 
@@ -1102,24 +1129,63 @@ def start_discord_bot():
         _discord_ready.set()
         logger.info("[DISCORD] logged in as %s", getattr(client.user, "name", "unknown"))
 
+try:
+    gcount = len(getattr(client, "guilds", []) or [])
+    logger.info(
+        "[DISCORD] ready guilds=%d dm_only=%s allowed_users=%s allowed_channels=%s push_channels=%s",
+        gcount,
+        DISCORD_DM_ONLY,
+        ",".join(sorted(DISCORD_ALLOWED_USER_IDS)) if DISCORD_ALLOWED_USER_IDS else "(all)",
+        ",".join(sorted(DISCORD_ALLOWED_CHANNEL_IDS)) if DISCORD_ALLOWED_CHANNEL_IDS else "(all)",
+        ",".join(sorted(DISCORD_PUSH_CHANNEL_IDS)) if DISCORD_PUSH_CHANNEL_IDS else "(none)",
+    )
+except Exception:
+    pass
+
     @client.event
     async def on_message(message: "discord.Message"):
+
         try:
-            if message.author.bot:
-                return
-
             uid = str(message.author.id)
-            if DISCORD_ALLOWED_USER_IDS and uid not in DISCORD_ALLOWED_USER_IDS:
+            guild_id = str(message.guild.id) if message.guild is not None else "-"
+            channel_id = str(getattr(message.channel, "id", "")) if getattr(message, "channel", None) is not None else "-"
+            author_name = getattr(message.author, "display_name", None) or getattr(message.author, "name", "") or ""
+            raw_content = message.content or ""
+            if DISCORD_DEBUG:
+                preview = raw_content.replace("\n", "\\n")[:200]
+                logger.info(
+                    '[DISCORD][IN] uid=%s name="%s" guild=%s channel=%s content_len=%d att=%d content="%s"',
+                    uid,
+                    author_name,
+                    guild_id,
+                    channel_id,
+                    len(raw_content),
+                    len(message.attachments or []),
+                    preview,
+                )
+
+            if message.author.bot:
+                if DISCORD_DEBUG:
+                    logger.info("[DISCORD][SKIP] bot_message uid=%s", uid)
                 return
 
-            # DM-only by default (safer), unless explicitly allowed
+            if DISCORD_ALLOWED_USER_IDS and uid not in DISCORD_ALLOWED_USER_IDS:
+                if DISCORD_DEBUG:
+                    logger.info("[DISCORD][SKIP] uid_not_allowed uid=%s", uid)
+                return
+
+            # DM-only unless explicitly disabled
             if message.guild is not None:
                 if DISCORD_DM_ONLY:
+                    if DISCORD_DEBUG:
+                        logger.info("[DISCORD][SKIP] guild_message_blocked dm_only=1 guild=%s channel=%s", guild_id, channel_id)
                     return
                 if DISCORD_ALLOWED_CHANNEL_IDS and str(message.channel.id) not in DISCORD_ALLOWED_CHANNEL_IDS:
+                    if DISCORD_DEBUG:
+                        logger.info("[DISCORD][SKIP] channel_not_allowed channel=%s", channel_id)
                     return
 
-            display_name = getattr(message.author, "display_name", None) or getattr(message.author, "name", "") or ""
+            display_name = author_name
 
             # handle image attachments
             if message.attachments:
@@ -1128,7 +1194,7 @@ def start_discord_bot():
                     if not ctype.startswith("image/"):
                         continue
                     data = await att.read()
-                    ext = _ext_from_content_type(ctype or None)  # uses existing helper
+                    ext = _ext_from_content_type(ctype or None)
                     message_id = f"discord_{message.id}_{i}"
                     filename = f"{message_id}{ext}"
                     filepath = MEDIA_DIR / filename
@@ -1147,13 +1213,18 @@ def start_discord_bot():
                         sender_name=display_name or "對方",
                         message_id=message_id,
                     )
-                    await message.channel.send("✅ 收到照片了，我已經幫你轉送給對方。" if ok else f"✅ 收到照片了，但目前無法轉送（{note}）。")
+                    await message.channel.send(
+                        "✅ 收到照片了，我已經幫你轉送給對方。" if ok else f"✅ 收到照片了，但目前無法轉送（{note}）。"
+                    )
 
-            content = (message.content or "").strip()
+            content = (raw_content or "").strip()
             if not content:
+                if DISCORD_DEBUG:
+                    logger.info("[DISCORD][SKIP] empty_content uid=%s guild=%s channel=%s", uid, guild_id, channel_id)
+                    logger.info("[DISCORD][HINT] If you're testing in a server and always see empty content, enable Message Content Intent in Developer Portal.")
                 return
 
-            upsert_activity(uid, display_name, preview=content)  # reuse existing tracking
+            upsert_activity(uid, display_name, preview=content)
             out = handle_command(uid, content)
             txt = _discord_plain_text(out)
             if txt:
@@ -1161,6 +1232,7 @@ def start_discord_bot():
                     await message.channel.send(chunk)
         except Exception as e:
             logger.exception("[DISCORD] on_message error: %s", str(e))
+
 
     def _runner():
         global _discord_loop
@@ -2173,6 +2245,12 @@ def handle_command(user_id: str, text: str) -> str:
         if not _dash_user_allowed(user_id):
             return "🔒 儀表板是私人資料。請先在 LINE 設定角色：我是臭寶 / 我是臭晡晡（且兩人都加入推播）。"
         login_url = _dash_make_login_url(user_id)
+
+        # Discord 無法直接「點 Flex 卡片」；改回傳純文字一次性登入連結。
+        if _is_discord_id(user_id):
+            ttl_min = max(1, int(DASH_MAGIC_TOKEN_TTL_SECONDS // 60))
+            return f"🔐 儀表板一次性登入連結（{ttl_min} 分鐘有效）：\n{login_url}"
+
         return [
             {
                 "type": "flex",
@@ -4193,7 +4271,7 @@ DASH_LOGIN_REQUIRED_TEMPLATE = """<!doctype html>
   <div class="wrap">
     <div class="card">
       <h1>🔒 需要登入才能看私人資料</h1>
-      <p>請回到 LINE，輸入 <code>儀表板</code>，或打 <code>help</code> 點「開啟儀表板」取得一次性登入連結。</p>
+      <p>請回到 LINE 或 Discord，輸入 <code>儀表板</code>，或打 <code>help</code> 點「開啟儀表板」取得一次性登入連結。</p>
       <p class="muted">（這樣網址不需要手打 token，也不會長期暴露在瀏覽器紀錄裡）</p>
       <p style="margin-top:16px;">
         <a class="btn" href="{{ docs_url }}">回到使用說明</a>
@@ -4223,7 +4301,7 @@ DASH_LOGIN_FAIL_TEMPLATE = """<!doctype html>
   <div class="wrap">
     <div class="card">
       <h1>⚠️ 登入連結無效或已過期</h1>
-      <p>請回到 LINE，輸入 <code>儀表板</code> 重新取得一次性登入連結。</p>
+      <p>請回到 LINE 或 Discord，輸入 <code>儀表板</code> 重新取得一次性登入連結。</p>
       <p style="margin-top:16px;">
         <a class="btn" href="{{ docs_url }}">回到使用說明</a>
       </p>
