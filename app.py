@@ -110,7 +110,7 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()  # optional b
 # - DISCORD_ALLOWED_USER_IDS / DISCORD_ALLOWED_CHANNEL_IDS: comma-separated allowlists (optional)
 DISCORD_BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or "").strip()
 ENABLE_DISCORD_BOT = os.getenv("ENABLE_DISCORD_BOT", "0") == "1" or bool(DISCORD_BOT_TOKEN)
-DISCORD_DM_ONLY = os.getenv("DISCORD_DM_ONLY", "1") == "1"
+DISCORD_DM_ONLY = os.getenv("DISCORD_DM_ONLY", "0") == "1"
 DISCORD_ALLOWED_USER_IDS = set(
     [s.strip() for s in (os.getenv("DISCORD_ALLOWED_USER_IDS") or "").split(",") if s.strip()]
 )
@@ -119,8 +119,18 @@ DISCORD_ALLOWED_CHANNEL_IDS = set(
 )
 
 
-# DISCORD_DEBUG=1 to print incoming message diagnostics (useful when troubleshooting intents / DM-only / allowlists)
-DISCORD_DEBUG = os.getenv("DISCORD_DEBUG", "1") == "1"
+# Discord push (broadcast) targets for scheduled notifications
+# - DISCORD_PUSH_CHANNEL_IDS / DISCORD_PUSH_CHANNEL_ID: comma-separated channel IDs for broadcast pushes
+# - DISCORD_PUSH_DM=1 to also DM role-bound users on Discord (default: auto; DM only if no push channels set)
+_raw_push_channels = (os.getenv("DISCORD_PUSH_CHANNEL_IDS") or os.getenv("DISCORD_PUSH_CHANNEL_ID") or "").strip()
+DISCORD_PUSH_CHANNEL_IDS = set([s.strip() for s in _raw_push_channels.split(",") if s.strip()])
+
+if os.getenv("DISCORD_PUSH_DM") is None:
+    # If you configured broadcast channels, default to NOT DM (avoid double notifications).
+    DISCORD_PUSH_DM = not bool(DISCORD_PUSH_CHANNEL_IDS)
+else:
+    DISCORD_PUSH_DM = os.getenv("DISCORD_PUSH_DM", "0") == "1"
+
 
 
 
@@ -846,7 +856,7 @@ def push_and_log(
     target_role: str | None = None,
 ):
     """
-    Unified LINE push with logging
+    Unified push (LINE + Discord) with logging
     """
     preview = message.replace("\n", " ")[:80]
 
@@ -859,7 +869,7 @@ def push_and_log(
     )
 
     try:
-        line_push_text(to_user_id, message)
+        unified_push_text(to_user_id, message)
     except Exception as e:
         logger.error(
             "[PUSH][%s][FAILED] to=%s role=%s err=%s",
@@ -1079,25 +1089,10 @@ def start_discord_bot():
         return  # already started
 
     import discord  # local import
-
-    if DISCORD_DEBUG:
-        # Let discord.py emit useful diagnostics (handy when troubleshooting missing events)
-        try:
-            discord.utils.setup_logging(level=logging.INFO, root=True)
-        except Exception:
-            logging.getLogger("discord").setLevel(logging.INFO)
-
     intents = discord.Intents.default()
-    # NOTE: "Message Content Intent" is privileged — enable it in Discord Developer Portal,
-    # otherwise guild message content may be empty and some events may not be delivered.
-    intents.message_content = True
-
-    # Make sure we receive both DM + guild message events across discord.py 2.x variants.
-    for _attr in ("guilds", "messages", "guild_messages", "dm_messages"):
-        try:
-            setattr(intents, _attr, True)
-        except Exception:
-            pass
+    intents.message_content = True  # requires enabling Message Content Intent in Developer Portal
+    intents.messages = True
+    intents.dm_messages = True
 
     client = discord.Client(intents=intents)
     _discord_client = client
@@ -1114,45 +1109,14 @@ def start_discord_bot():
                 return
 
             uid = str(message.author.id)
-
-            # Debug: always print what Discord delivered (helps diagnose DM-only / allowlists / missing intents)
-            if DISCORD_DEBUG:
-                g = message.guild
-                guild_name = getattr(g, "name", None) if g else None
-                guild_id = getattr(g, "id", None) if g else None
-                ch = message.channel
-                channel_name = getattr(ch, "name", None) if ch else None
-                channel_id = getattr(ch, "id", None) if ch else None
-                author_name = getattr(message.author, "display_name", None) or getattr(message.author, "name", "") or ""
-                preview = (message.content or "").replace("\n", "\\n")
-                if len(preview) > 200:
-                    preview = preview[:200] + "…"
-                logger.info(
-                    "[DISCORD][IN] guild=%s(%s) channel=%s(%s) uid=%s name=%s content=%r attachments=%d",
-                    guild_name,
-                    guild_id,
-                    channel_name,
-                    channel_id,
-                    uid,
-                    author_name,
-                    preview,
-                    len(getattr(message, "attachments", []) or []),
-                )
-
             if DISCORD_ALLOWED_USER_IDS and uid not in DISCORD_ALLOWED_USER_IDS:
-                if DISCORD_DEBUG:
-                    logger.info("[DISCORD][DROP] uid not in DISCORD_ALLOWED_USER_IDS uid=%s", uid)
                 return
 
             # DM-only by default (safer), unless explicitly allowed
             if message.guild is not None:
                 if DISCORD_DM_ONLY:
-                    if DISCORD_DEBUG:
-                        logger.info("[DISCORD][DROP] guild message ignored (DISCORD_DM_ONLY=1)")
                     return
                 if DISCORD_ALLOWED_CHANNEL_IDS and str(message.channel.id) not in DISCORD_ALLOWED_CHANNEL_IDS:
-                    if DISCORD_DEBUG:
-                        logger.info("[DISCORD][DROP] channel not in DISCORD_ALLOWED_CHANNEL_IDS channel_id=%s", str(message.channel.id))
                     return
 
             display_name = getattr(message.author, "display_name", None) or getattr(message.author, "name", "") or ""
@@ -1334,13 +1298,95 @@ def dash_thumb_src(message_id: str, w: int = 480) -> str:
 
 
 
+def _get_active_role_ids() -> dict[str, list[str]]:
+    """Return active user_ids for girlfriend/boyfriend. Supports multiple IDs per role (LINE + Discord)."""
+    import sqlite3
+    out: dict[str, list[str]] = {"girlfriend": [], "boyfriend": []}
+    try:
+        conn = sqlite3.connect(str(LOVE_DB_PATH))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT line_user_id, role FROM subscriber WHERE is_active=1 AND role IN ('girlfriend','boyfriend')"
+        ).fetchall()
+        for r in rows:
+            uid = (r["line_user_id"] or "").strip()
+            role = (r["role"] or "").strip()
+            if uid and role in out and uid not in out[role]:
+                out[role].append(uid)
+    except Exception as e:
+        logger.error("[ROLE] _get_active_role_ids failed: %s", str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return out
+
+
+def _get_role_ids(role: str) -> list[str]:
+    return _get_active_role_ids().get(role, []) or []
+
+
+def _pick_primary_uid(uids: list[str]) -> str | None:
+    """Prefer LINE user id (starts with 'U') for DB-bound features; otherwise first."""
+    if not uids:
+        return None
+    for u in uids:
+        if (u or "").startswith("U"):
+            return u
+    return uids[0]
+
+
+def _push_to_discord_channels_text(text: str):
+    if not (_discord_enabled() and DISCORD_PUSH_CHANNEL_IDS):
+        return
+    for cid in sorted(DISCORD_PUSH_CHANNEL_IDS):
+        try:
+            logger.info('[DISCORD_PUSH][CHANNEL] to=%s msg="%s"', cid, text.replace("\n", " ")[:80])
+            discord_send_channel_text(cid, text)
+        except Exception as e:
+            logger.error("[DISCORD_PUSH][CHANNEL][FAILED] to=%s err=%s", cid, str(e))
+
+
+def unified_push_messages(to_user_id: str, messages: list[dict]):
+    """Push LINE payload to LINE user OR Discord user (best-effort conversion)."""
+    if _is_discord_id(to_user_id):
+        return discord_send_messages(to_user_id, messages)
+    return line_push_messages(to_user_id, messages)
+
+
+def unified_push_text(to_user_id: str, text: str):
+    if _is_discord_id(to_user_id):
+        return discord_send_text(to_user_id, text)
+    return line_push_text(to_user_id, text)
+
+
+def push_to_role_text(role: str, message: str, *, reason: str):
+    _push_to_discord_channels_text(message)
+    for uid in _get_role_ids(role):
+        if _is_discord_id(uid) and not DISCORD_PUSH_DM:
+            continue
+        push_and_log(uid, message, reason=reason, target_role=role)
+
+
+def push_to_roles_text(roles: tuple[str, ...], message: str, *, reason: str):
+    _push_to_discord_channels_text(message)
+    for role in roles:
+        for uid in _get_role_ids(role):
+            if _is_discord_id(uid) and not DISCORD_PUSH_DM:
+                continue
+            push_and_log(uid, message, reason=reason, target_role=role)
+
+
 def push_to_couple_text(message: str, fallback_user_id: str | None = None):
-    ids = [x for x in get_couple_user_ids(db_path=LOVE_DB_PATH) if x]
-    if len(ids) >= 2:
-        for uid in ids:
-            line_push_text(uid, message)
+    """Push to both roles (LINE + optional Discord DM) + optional Discord broadcast channels."""
+    gf_ids = _get_role_ids("girlfriend")
+    bf_ids = _get_role_ids("boyfriend")
+    if gf_ids or bf_ids:
+        push_to_roles_text(("girlfriend", "boyfriend"), message, reason="COUPLE_PUSH")
         return
 
+    # fallback (legacy)
     fb: list[str] = []
     if fallback_user_id:
         fb.append(fallback_user_id)
@@ -1592,9 +1638,9 @@ def build_photo_task_message(assign_role: str, task_text: str, task_id: int) -> 
 
 # ====== conversation status ======
 def build_conversation_status_text() -> str:
-    role_map = get_role_map_active(db_path=LOVE_DB_PATH)
-    gf_id = role_map.get("girlfriend")
-    bf_id = role_map.get("boyfriend")
+    role_ids = _get_active_role_ids()
+    gf_id = _pick_primary_uid(role_ids.get("girlfriend") or [])
+    bf_id = _pick_primary_uid(role_ids.get("boyfriend") or [])
 
     if not gf_id or not bf_id:
         return (
@@ -1658,10 +1704,9 @@ def build_conversation_status_text() -> str:
 
 
 def relay_message(from_user_id: str, to_role: str, content: str) -> str:
-    role_map = get_role_map_active(db_path=LOVE_DB_PATH)
-    target_id = role_map.get(to_role)
-    if not target_id:
-        return "⚠️ 目標尚未設定角色。請雙方先說：我是臭寶 / 我是臭晡晡"
+    target_ids = [uid for uid in _get_role_ids(to_role) if uid and uid != from_user_id]
+    if not target_ids:
+        return "⚠️ 目標尚未設定角色或未加入推播。請雙方先說：我是臭寶 / 我是臭晡晡（並加入推播）"
     if not content.strip():
         return "用法：跟臭寶說 <內容> 或 跟臭晡晡說 <內容>"
 
@@ -1669,9 +1714,14 @@ def relay_message(from_user_id: str, to_role: str, content: str) -> str:
     now = _tz_now().strftime("%m/%d %H:%M")
     msg = f"💬 {sender_name}（{now}）想跟你說：\n{content.strip()}"
 
-    line_push_text(target_id, msg)
-    line_push_text(from_user_id, "✅ 已幫你送出。")
-    return "✅ 已轉送（我也推播確認給你了）。"
+    for tid in target_ids:
+        try:
+            unified_push_text(tid, msg)
+        except Exception as e:
+            logger.error("[RELAY][FAILED] to=%s err=%s", tid, str(e))
+
+    return "✅ 已轉達給對方。"
+
 
 
 # ====== help / command parsing ======
@@ -1866,18 +1916,26 @@ def build_help_flex(base_url: str, dash_login_url: str | None = None) -> dict:
                 "action": {"type": "uri", "label": "開啟儀表板", "uri": dash_login_url},
             }
         )
-    else:
-        # Still show a dashboard entry in help (link will be generated after identity binding)
-        footer_contents.append(_msg_btn("儀表板", "儀表板", style="primary"))
 
-    footer_contents.append(
+    else:
+        # Always show dashboard entry; if user not authorized, bot will explain how to unlock.
+        footer_contents.append(
+            {
+                "type": "button",
+                "style": "primary",
+                "height": "sm",
+                "action": {"type": "message", "label": "儀表板", "text": "儀表板"},
+            }
+        )
+
+        footer_contents.append(
         {
             "type": "button",
-            "style": "secondary",
+            "style": "secondary" if dash_login_url else "primary",
             "action": {"type": "uri", "label": "開啟使用說明", "uri": f"{base_url}/docs"},
         }
     )
-    footer_contents.append(
+        footer_contents.append(
         {
             "type": "button",
             "style": "secondary",
@@ -1957,31 +2015,6 @@ def build_dashboard_login_flex(base_url: str, login_url: str) -> dict:
         },
     }
 
-
-def build_gallery_login_flex(base_url: str, login_url: str) -> dict:
-    """Flex card that logs in and redirects to the gallery."""
-    return {
-        "type": "bubble",
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "md",
-            "contents": [
-                {"type": "text", "text": f"{BOT_NAME}｜相簿", "weight": "bold", "size": "xl"},
-                {"type": "text", "text": "這是一個一次性/短效登入連結，點開即可登入並前往相簿。", "wrap": True, "size": "sm", "color": "#666666"},
-            ],
-        },
-        "footer": {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "sm",
-            "contents": [
-                {"type": "button", "style": "primary", "action": {"type": "uri", "label": "開啟相簿", "uri": login_url}},
-                {"type": "button", "style": "secondary", "action": {"type": "uri", "label": "使用說明", "uri": f"{base_url}/docs"}},
-            ],
-        },
-    }
-
 def _cmd(text: str) -> tuple[str, str]:
     """
     支援：
@@ -2025,30 +2058,34 @@ def forward_image_to_other_party(sender_user_id: str, sender_name: str, message_
     """
     Returns (forwarded_ok, note_text)
     note_text can include matched task info.
+    Supports multiple IDs per role (LINE + Discord).
     """
-    role_map = get_role_map_active(db_path=LOVE_DB_PATH)
-    gf_id = role_map.get("girlfriend")
-    bf_id = role_map.get("boyfriend")
+    role_ids = _get_active_role_ids()
+    gf_ids = role_ids.get("girlfriend") or []
+    bf_ids = role_ids.get("boyfriend") or []
 
-    if not gf_id or not bf_id:
+    if not gf_ids or not bf_ids:
         return False, "roles not ready"
 
-    if sender_user_id == gf_id:
-        target_id = bf_id
+    if sender_user_id in gf_ids:
         sender_role = "girlfriend"
+        target_role = "boyfriend"
         target_label = DEFAULT_SELF_NICKNAME
-    elif sender_user_id == bf_id:
-        target_id = gf_id
+    elif sender_user_id in bf_ids:
         sender_role = "boyfriend"
+        target_role = "girlfriend"
         target_label = DEFAULT_GIRLFRIEND_NICKNAME
     else:
         return False, "sender not in couple"
+
+    target_ids = [uid for uid in _get_role_ids(target_role) if uid and uid != sender_user_id]
+    if not target_ids:
+        return False, "target not set"
 
     media_url = build_media_url(message_id)
     if not media_url:
         return False, "PUBLIC_BASE_URL not set"
 
-    # match latest open task for sender_role
     matched = claim_latest_open_task_for_role(
         db_path=LOVE_DB_PATH, role=sender_role, expire_minutes=PHOTO_TASK_EXPIRE_MIN, message_id=message_id
     )
@@ -2059,14 +2096,24 @@ def forward_image_to_other_party(sender_user_id: str, sender_name: str, message_
     now = _tz_now().strftime("%m/%d %H:%M")
     caption = f"📷 {sender_name}（{now}）傳來一張照片給你（{target_label}）{task_note}"
 
-    line_push_messages(
-        target_id,
-        [
-            {"type": "text", "text": caption},
-            {"type": "image", "originalContentUrl": media_url, "previewImageUrl": media_url},
-        ],
-    )
-    return True, "forwarded"
+    ok_any = False
+    for target_id in target_ids:
+        try:
+            if _is_discord_id(target_id):
+                unified_push_text(target_id, caption + f"\n{media_url}")
+            else:
+                unified_push_messages(
+                    target_id,
+                    [
+                        {"type": "text", "text": caption},
+                        {"type": "image", "originalContentUrl": media_url, "previewImageUrl": media_url},
+                    ],
+                )
+            ok_any = True
+        except Exception as e:
+            logger.error("[PHOTO_FWD][FAILED] to=%s err=%s", target_id, str(e))
+    return (ok_any, "forwarded" if ok_any else "failed")
+
 
 
 # ====== command handler ======
@@ -2089,15 +2136,9 @@ def handle_command(user_id: str, text: str) -> str:
             )
 
             # notify boyfriend (臭晡晡)
-            rm = get_role_map_active(db_path=LOVE_DB_PATH)  # maps girlfriend/boyfriend :contentReference[oaicite:9]{index=9}
-            bf_id = rm.get("boyfriend")
-            if bf_id:
-                push_and_log(
-                    bf_id,
-                    f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天已吃事前藥（{label}）。",
-                    reason="MED_CONFIRM_NOTIFY",
-                    target_role="boyfriend",
-                )
+
+
+            push_to_roles_text(("boyfriend",), f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天已吃事前藥（{label}）。", reason="MED_CONFIRM_NOTIFY")
 
 
             return f"收到～我記錄你今天 {label} 吃藥，並已通知 {DEFAULT_SELF_NICKNAME}。"
@@ -2110,11 +2151,6 @@ def handle_command(user_id: str, text: str) -> str:
     if cmd in ("help", "說明", "幫助"):
         base_url = get_public_base_url()
         dash_login_url = None
-        try:
-            allowed = _dash_user_allowed(user_id)
-            logger.info("[DASH] help requested uid=%s allowed=%s", user_id, allowed)
-        except Exception:
-            pass
         try:
             if _dash_user_allowed(user_id):
                 dash_login_url = _dash_make_login_url(user_id)
@@ -2134,11 +2170,6 @@ def handle_command(user_id: str, text: str) -> str:
 
     if cmd in ("儀表板", "面板") or cmd_l in ("dashboard", "dash"):
         base_url = get_public_base_url()
-        try:
-            allowed = _dash_user_allowed(user_id)
-            logger.info("[DASH] dashboard cmd uid=%s allowed=%s", user_id, allowed)
-        except Exception:
-            pass
         if not _dash_user_allowed(user_id):
             return "🔒 儀表板是私人資料。請先在 LINE 設定角色：我是臭寶 / 我是臭晡晡（且兩人都加入推播）。"
         login_url = _dash_make_login_url(user_id)
@@ -2149,21 +2180,6 @@ def handle_command(user_id: str, text: str) -> str:
                 "contents": build_dashboard_login_flex(base_url, login_url),
             }
         ]
-
-    if cmd in ("相簿", "相片", "照片") or cmd_l in ("gallery",):
-        base_url = get_public_base_url()
-        if not _dash_user_allowed(user_id):
-            return "🔒 相簿是私人資料。請先在 LINE 設定角色：我是臭寶 / 我是臭晡晡（且兩人都加入推播）。"
-        login_url = _dash_make_login_url(user_id, next_path="/dash/gallery")
-        return [
-            {
-                "type": "flex",
-                "altText": f"{BOT_NAME} 相簿",
-                "contents": build_gallery_login_flex(base_url, login_url),
-            }
-        ]
-
-
 
 
     # identity / push
@@ -2185,8 +2201,7 @@ def handle_command(user_id: str, text: str) -> str:
         set_active(db_path=LOVE_DB_PATH, user_id=user_id, is_active=False)
         return "✅ 已退出推播。"
     if cmd in ("吃藥狀態", "藥狀態"):
-        rm = get_role_map_active(db_path=LOVE_DB_PATH)
-        gf_id = rm.get("girlfriend")
+        gf_id = _pick_primary_uid(_get_role_ids("girlfriend"))
         if not gf_id:
             return "目前沒有設定 girlfriend/boyfriend 角色，先用「設定角色」把雙方設好。"
         now = _tz_now()
@@ -2196,8 +2211,7 @@ def handle_command(user_id: str, text: str) -> str:
             return f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天已回報吃藥（{row.get('taken_time_text') or '已記錄'}）。"
         return f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天尚未回報吃藥。已提醒 {int(row.get('remind_count') or 0)} 次。"
     if cmd in ("取消吃藥", "重置吃藥", "撤銷吃藥"):
-        rm = get_role_map_active(db_path=LOVE_DB_PATH)
-        gf_id = rm.get("girlfriend")
+        gf_id = _pick_primary_uid(_get_role_ids("girlfriend"))
         if not gf_id:
             return "目前沒有設定 girlfriend/boyfriend 角色，先用「我是臭寶 / 我是臭晡晡」設好。"
 
@@ -2224,8 +2238,7 @@ def handle_command(user_id: str, text: str) -> str:
 
     # ===== medication: pill history (max 30 days) =====
     if cmd in ("吃藥紀錄", "吃藥記錄", "藥紀錄", "藥記錄"):
-        rm = get_role_map_active(db_path=LOVE_DB_PATH)
-        gf_id = rm.get("girlfriend")
+        gf_id = _pick_primary_uid(_get_role_ids("girlfriend"))
         if not gf_id:
             return "目前沒有設定 girlfriend/boyfriend 角色，先用「我是臭寶 / 我是臭晡晡」設好。"
 
@@ -2515,9 +2528,9 @@ def handle_command(user_id: str, text: str) -> str:
             target = "boyfriend"
             rest = a[len("給臭晡晡"):].strip()
 
-        role_map = get_role_map_active(db_path=LOVE_DB_PATH)
-        gf_id = role_map.get("girlfriend")
-        bf_id = role_map.get("boyfriend")
+        role_ids = _get_active_role_ids()
+        gf_id = _pick_primary_uid(role_ids.get("girlfriend") or [])
+        bf_id = _pick_primary_uid(role_ids.get("boyfriend") or [])
         if not gf_id or not bf_id:
             # still allow creating tasks, but pushing might fallback
             pass
@@ -2735,8 +2748,7 @@ def scheduled_med_pill_daily():
     if not med_pill_enabled():
         return
 
-    rm = get_role_map_active(db_path=LOVE_DB_PATH)
-    gf_id = rm.get("girlfriend")
+    gf_id = _pick_primary_uid(_get_role_ids("girlfriend"))
     if not gf_id:
         return
 
@@ -2755,23 +2767,20 @@ def scheduled_med_pill_daily():
         return
 
     msg = build_med_pill_message(cur_cnt)
-    push_and_log(
-        gf_id,
-        msg,
-        reason="MED_DAILY",
-        target_role="girlfriend",
-    )
+
+    # Push to girlfriend role recipients (LINE + optional Discord DM) + optional Discord broadcast channels
+    push_to_roles_text(("girlfriend",), msg, reason="MED_DAILY")
 
     mark_med_pill_reminded(db_path=LOVE_DB_PATH, user_id=gf_id, day=day, remind_at_iso=now.isoformat(timespec="seconds"))
     print("[SCHED][MED] daily pill reminder pushed.", flush=True)
+
 
 
 def scheduled_med_pill_nudge():
     if not med_pill_enabled():
         return
 
-    rm = get_role_map_active(db_path=LOVE_DB_PATH)
-    gf_id = rm.get("girlfriend")
+    gf_id = _pick_primary_uid(_get_role_ids("girlfriend"))
     if not gf_id:
         return
 
@@ -2801,12 +2810,7 @@ def scheduled_med_pill_nudge():
         return
 
     msg = build_med_pill_message(cur_cnt)
-    push_and_log(
-        gf_id,
-        msg,
-        reason="MED_NUDGE",
-        target_role="girlfriend",
-    )
+    push_to_roles_text(("girlfriend",), msg, reason="MED_NUDGE")
 
     mark_med_pill_reminded(db_path=LOVE_DB_PATH, user_id=gf_id, day=day, remind_at_iso=now.isoformat(timespec="seconds"))
     print("[SCHED][MED] nudge pushed.", flush=True)
@@ -4270,12 +4274,13 @@ def _dashboard_session_valid() -> bool:
 
 
 def _dash_allowed_user_ids() -> set[str]:
-    rm = get_role_map_active(db_path=LOVE_DB_PATH)
-    allowed = set()
-    for k in ("girlfriend", "boyfriend"):
-        uid = (rm.get(k) or "").strip()
-        if uid:
-            allowed.add(uid)
+    role_ids = _get_active_role_ids()
+    allowed: set[str] = set()
+    for role in ("girlfriend", "boyfriend"):
+        for uid in role_ids.get(role, []) or []:
+            uid = (uid or "").strip()
+            if uid:
+                allowed.add(uid)
     return allowed
 
 
@@ -4286,19 +4291,14 @@ def _dash_user_allowed(user_id: str) -> bool:
     return user_id in _dash_allowed_user_ids()
 
 
-def _dash_make_login_url(for_user_id: str, next_path: str = "/dash") -> str:
+def _dash_make_login_url(for_user_id: str) -> str:
     base_url = get_public_base_url()
     token = create_dashboard_magic_token(
         db_path=LOVE_DB_PATH,
         user_id=for_user_id,
         ttl_seconds=DASH_MAGIC_TOKEN_TTL_SECONDS,
     )
-    # allow redirect to another dashboard page after login (e.g. /dash/gallery)
-    next_path = (next_path or "/dash").strip()
-    if not next_path.startswith("/dash"):
-        next_path = "/dash"
-    # next_path is a local path; keep it simple to avoid URL encoding surprises in LINE clients
-    return f"{base_url}/dash/login?t={token}&next={next_path}"
+    return f"{base_url}/dash/login?t={token}"
 
 
 def _dash_require_page():
@@ -4374,9 +4374,9 @@ def _build_dash_base() -> dict:
     base_url = get_public_base_url()
     updated_at = _tz_now().strftime("%Y-%m-%d %H:%M:%S")
 
-    rm = get_role_map_active(db_path=LOVE_DB_PATH)
-    gf_id = rm.get("girlfriend")
-    bf_id = rm.get("boyfriend")
+    role_ids = _get_active_role_ids()
+    gf_id = _pick_primary_uid(role_ids.get("girlfriend") or [])
+    bf_id = _pick_primary_uid(role_ids.get("boyfriend") or [])
 
     gf_name = _safe_name(gf_id) or DEFAULT_GIRLFRIEND_NICKNAME
     bf_name = _safe_name(bf_id) or DEFAULT_BOYFRIEND_NICKNAME
@@ -4399,9 +4399,9 @@ def _build_dash_base() -> dict:
 def _build_dashboard_data() -> dict:
     base_url = get_public_base_url()
     updated_at = _tz_now().strftime("%Y-%m-%d %H:%M:%S")
-    rm = get_role_map_active(db_path=LOVE_DB_PATH)
-    gf_id = rm.get("girlfriend")
-    bf_id = rm.get("boyfriend")
+    role_ids = _get_active_role_ids()
+    gf_id = _pick_primary_uid(role_ids.get("girlfriend") or [])
+    bf_id = _pick_primary_uid(role_ids.get("boyfriend") or [])
 
     gf_name = _safe_name(gf_id) or DEFAULT_GIRLFRIEND_NICKNAME
     bf_name = _safe_name(bf_id) or DEFAULT_BOYFRIEND_NICKNAME
@@ -4525,11 +4525,7 @@ def dash_login():
     session["dash_uid"] = uid
     session["dash_exp"] = int(time.time()) + DASH_SESSION_TTL_SECONDS
     session["dash_at"] = int(time.time())
-
-    next_path = (request.args.get("next") or "/dash").strip()
-    if not next_path.startswith("/dash"):
-        next_path = "/dash"
-    return redirect(next_path)
+    return redirect("/dash")
 
 
 @app.route("/dash/logout")
@@ -4727,9 +4723,9 @@ def dash_gallery():
         task_id_int = None
 
     # Resolve gf/bf ids once (avoid N+1 DB calls in gallery)
-    rm = get_role_map_active(db_path=LOVE_DB_PATH)
-    gf_id = rm.get("girlfriend")
-    bf_id = rm.get("boyfriend")
+    role_ids = _get_active_role_ids()
+    gf_id = _pick_primary_uid(role_ids.get("girlfriend") or [])
+    bf_id = _pick_primary_uid(role_ids.get("boyfriend") or [])
 
     def _who(uid: str | None) -> str:
         if not uid:
