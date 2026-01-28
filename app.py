@@ -1128,19 +1128,18 @@ def start_discord_bot():
     async def on_ready():
         _discord_ready.set()
         logger.info("[DISCORD] logged in as %s", getattr(client.user, "name", "unknown"))
-
-try:
-    gcount = len(getattr(client, "guilds", []) or [])
-    logger.info(
-        "[DISCORD] ready guilds=%d dm_only=%s allowed_users=%s allowed_channels=%s push_channels=%s",
-        gcount,
-        DISCORD_DM_ONLY,
-        ",".join(sorted(DISCORD_ALLOWED_USER_IDS)) if DISCORD_ALLOWED_USER_IDS else "(all)",
-        ",".join(sorted(DISCORD_ALLOWED_CHANNEL_IDS)) if DISCORD_ALLOWED_CHANNEL_IDS else "(all)",
-        ",".join(sorted(DISCORD_PUSH_CHANNEL_IDS)) if DISCORD_PUSH_CHANNEL_IDS else "(none)",
-    )
-except Exception:
-    pass
+        try:
+            gcount = len(getattr(client, "guilds", []) or [])
+            logger.info(
+                "[DISCORD] ready guilds=%d dm_only=%s allowed_users=%s allowed_channels=%s push_channels=%s",
+                gcount,
+                DISCORD_DM_ONLY,
+                ",".join(sorted(DISCORD_ALLOWED_USER_IDS)) if DISCORD_ALLOWED_USER_IDS else "(all)",
+                ",".join(sorted(DISCORD_ALLOWED_CHANNEL_IDS)) if DISCORD_ALLOWED_CHANNEL_IDS else "(all)",
+                ",".join(sorted(DISCORD_PUSH_CHANNEL_IDS)) if DISCORD_PUSH_CHANNEL_IDS else "(none)",
+            )
+        except Exception:
+            pass
 
     @client.event
     async def on_message(message: "discord.Message"):
@@ -1249,6 +1248,7 @@ except Exception:
     t = threading.Thread(target=_runner, name="discord-bot", daemon=True)
     t.start()
     logger.info("[DISCORD] starting thread...")
+
 
 
 def line_push_messages(to_user_id: str, messages: list[dict]):
