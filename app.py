@@ -119,6 +119,10 @@ DISCORD_ALLOWED_CHANNEL_IDS = set(
 )
 
 
+# DISCORD_DEBUG=1 to print incoming message diagnostics (useful when troubleshooting intents / DM-only / allowlists)
+DISCORD_DEBUG = os.getenv("DISCORD_DEBUG", "1") == "1"
+
+
 
 # ====== Flask session (for dashboard login) ======
 # 建議在 Zeabur 設定：
@@ -1075,10 +1079,25 @@ def start_discord_bot():
         return  # already started
 
     import discord  # local import
+
+    if DISCORD_DEBUG:
+        # Let discord.py emit useful diagnostics (handy when troubleshooting missing events)
+        try:
+            discord.utils.setup_logging(level=logging.INFO, root=True)
+        except Exception:
+            logging.getLogger("discord").setLevel(logging.INFO)
+
     intents = discord.Intents.default()
-    intents.message_content = True  # requires enabling Message Content Intent in Developer Portal
-    intents.messages = True
-    intents.dm_messages = True
+    # NOTE: "Message Content Intent" is privileged — enable it in Discord Developer Portal,
+    # otherwise guild message content may be empty and some events may not be delivered.
+    intents.message_content = True
+
+    # Make sure we receive both DM + guild message events across discord.py 2.x variants.
+    for _attr in ("guilds", "messages", "guild_messages", "dm_messages"):
+        try:
+            setattr(intents, _attr, True)
+        except Exception:
+            pass
 
     client = discord.Client(intents=intents)
     _discord_client = client
@@ -1095,14 +1114,45 @@ def start_discord_bot():
                 return
 
             uid = str(message.author.id)
+
+            # Debug: always print what Discord delivered (helps diagnose DM-only / allowlists / missing intents)
+            if DISCORD_DEBUG:
+                g = message.guild
+                guild_name = getattr(g, "name", None) if g else None
+                guild_id = getattr(g, "id", None) if g else None
+                ch = message.channel
+                channel_name = getattr(ch, "name", None) if ch else None
+                channel_id = getattr(ch, "id", None) if ch else None
+                author_name = getattr(message.author, "display_name", None) or getattr(message.author, "name", "") or ""
+                preview = (message.content or "").replace("\n", "\\n")
+                if len(preview) > 200:
+                    preview = preview[:200] + "…"
+                logger.info(
+                    "[DISCORD][IN] guild=%s(%s) channel=%s(%s) uid=%s name=%s content=%r attachments=%d",
+                    guild_name,
+                    guild_id,
+                    channel_name,
+                    channel_id,
+                    uid,
+                    author_name,
+                    preview,
+                    len(getattr(message, "attachments", []) or []),
+                )
+
             if DISCORD_ALLOWED_USER_IDS and uid not in DISCORD_ALLOWED_USER_IDS:
+                if DISCORD_DEBUG:
+                    logger.info("[DISCORD][DROP] uid not in DISCORD_ALLOWED_USER_IDS uid=%s", uid)
                 return
 
             # DM-only by default (safer), unless explicitly allowed
             if message.guild is not None:
                 if DISCORD_DM_ONLY:
+                    if DISCORD_DEBUG:
+                        logger.info("[DISCORD][DROP] guild message ignored (DISCORD_DM_ONLY=1)")
                     return
                 if DISCORD_ALLOWED_CHANNEL_IDS and str(message.channel.id) not in DISCORD_ALLOWED_CHANNEL_IDS:
+                    if DISCORD_DEBUG:
+                        logger.info("[DISCORD][DROP] channel not in DISCORD_ALLOWED_CHANNEL_IDS channel_id=%s", str(message.channel.id))
                     return
 
             display_name = getattr(message.author, "display_name", None) or getattr(message.author, "name", "") or ""
@@ -1816,11 +1866,14 @@ def build_help_flex(base_url: str, dash_login_url: str | None = None) -> dict:
                 "action": {"type": "uri", "label": "開啟儀表板", "uri": dash_login_url},
             }
         )
+    else:
+        # Still show a dashboard entry in help (link will be generated after identity binding)
+        footer_contents.append(_msg_btn("儀表板", "儀表板", style="primary"))
 
     footer_contents.append(
         {
             "type": "button",
-            "style": "secondary" if dash_login_url else "primary",
+            "style": "secondary",
             "action": {"type": "uri", "label": "開啟使用說明", "uri": f"{base_url}/docs"},
         }
     )
@@ -1899,6 +1952,31 @@ def build_dashboard_login_flex(base_url: str, login_url: str) -> dict:
             "spacing": "sm",
             "contents": [
                 {"type": "button", "style": "primary", "action": {"type": "uri", "label": "開啟儀表板", "uri": login_url}},
+                {"type": "button", "style": "secondary", "action": {"type": "uri", "label": "使用說明", "uri": f"{base_url}/docs"}},
+            ],
+        },
+    }
+
+
+def build_gallery_login_flex(base_url: str, login_url: str) -> dict:
+    """Flex card that logs in and redirects to the gallery."""
+    return {
+        "type": "bubble",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
+            "contents": [
+                {"type": "text", "text": f"{BOT_NAME}｜相簿", "weight": "bold", "size": "xl"},
+                {"type": "text", "text": "這是一個一次性/短效登入連結，點開即可登入並前往相簿。", "wrap": True, "size": "sm", "color": "#666666"},
+            ],
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+                {"type": "button", "style": "primary", "action": {"type": "uri", "label": "開啟相簿", "uri": login_url}},
                 {"type": "button", "style": "secondary", "action": {"type": "uri", "label": "使用說明", "uri": f"{base_url}/docs"}},
             ],
         },
@@ -2033,6 +2111,11 @@ def handle_command(user_id: str, text: str) -> str:
         base_url = get_public_base_url()
         dash_login_url = None
         try:
+            allowed = _dash_user_allowed(user_id)
+            logger.info("[DASH] help requested uid=%s allowed=%s", user_id, allowed)
+        except Exception:
+            pass
+        try:
             if _dash_user_allowed(user_id):
                 dash_login_url = _dash_make_login_url(user_id)
         except Exception:
@@ -2051,6 +2134,11 @@ def handle_command(user_id: str, text: str) -> str:
 
     if cmd in ("儀表板", "面板") or cmd_l in ("dashboard", "dash"):
         base_url = get_public_base_url()
+        try:
+            allowed = _dash_user_allowed(user_id)
+            logger.info("[DASH] dashboard cmd uid=%s allowed=%s", user_id, allowed)
+        except Exception:
+            pass
         if not _dash_user_allowed(user_id):
             return "🔒 儀表板是私人資料。請先在 LINE 設定角色：我是臭寶 / 我是臭晡晡（且兩人都加入推播）。"
         login_url = _dash_make_login_url(user_id)
@@ -2061,6 +2149,21 @@ def handle_command(user_id: str, text: str) -> str:
                 "contents": build_dashboard_login_flex(base_url, login_url),
             }
         ]
+
+    if cmd in ("相簿", "相片", "照片") or cmd_l in ("gallery",):
+        base_url = get_public_base_url()
+        if not _dash_user_allowed(user_id):
+            return "🔒 相簿是私人資料。請先在 LINE 設定角色：我是臭寶 / 我是臭晡晡（且兩人都加入推播）。"
+        login_url = _dash_make_login_url(user_id, next_path="/dash/gallery")
+        return [
+            {
+                "type": "flex",
+                "altText": f"{BOT_NAME} 相簿",
+                "contents": build_gallery_login_flex(base_url, login_url),
+            }
+        ]
+
+
 
 
     # identity / push
@@ -4183,14 +4286,19 @@ def _dash_user_allowed(user_id: str) -> bool:
     return user_id in _dash_allowed_user_ids()
 
 
-def _dash_make_login_url(for_user_id: str) -> str:
+def _dash_make_login_url(for_user_id: str, next_path: str = "/dash") -> str:
     base_url = get_public_base_url()
     token = create_dashboard_magic_token(
         db_path=LOVE_DB_PATH,
         user_id=for_user_id,
         ttl_seconds=DASH_MAGIC_TOKEN_TTL_SECONDS,
     )
-    return f"{base_url}/dash/login?t={token}"
+    # allow redirect to another dashboard page after login (e.g. /dash/gallery)
+    next_path = (next_path or "/dash").strip()
+    if not next_path.startswith("/dash"):
+        next_path = "/dash"
+    # next_path is a local path; keep it simple to avoid URL encoding surprises in LINE clients
+    return f"{base_url}/dash/login?t={token}&next={next_path}"
 
 
 def _dash_require_page():
@@ -4417,7 +4525,11 @@ def dash_login():
     session["dash_uid"] = uid
     session["dash_exp"] = int(time.time()) + DASH_SESSION_TTL_SECONDS
     session["dash_at"] = int(time.time())
-    return redirect("/dash")
+
+    next_path = (request.args.get("next") or "/dash").strip()
+    if not next_path.startswith("/dash"):
+        next_path = "/dash"
+    return redirect(next_path)
 
 
 @app.route("/dash/logout")
