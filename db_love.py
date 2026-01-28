@@ -899,6 +899,7 @@ def list_task_media_items(db_path: str, task_id: int | None = None, limit: int =
 
 
 
+
 def claim_latest_open_task_for_role(db_path: str, role: str, expire_minutes: int = 180, message_id: str | None = None):
     """
     Claim the latest open task for the role, mark it done, and optionally attach the incoming media message_id.
