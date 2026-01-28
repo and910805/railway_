@@ -3,3 +3,4 @@ requests
 gunicorn
 apscheduler
 Pillow
+discord.py==2.6.4

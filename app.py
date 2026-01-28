@@ -5,6 +5,8 @@ import base64
 import hashlib
 import datetime
 import time
+import asyncio
+import threading
 import mimetypes
 from PIL import Image, ImageOps
 from pathlib import Path
@@ -100,6 +102,22 @@ def _timing_end(resp):
 # ====== Env ======
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()  # optional but recommended
+
+
+# ====== Discord (optional) ======
+# - ENABLE_DISCORD_BOT=1 to enable bot runtime (or provide DISCORD_BOT_TOKEN)
+# - DISCORD_DM_ONLY=1 to only react in DMs
+# - DISCORD_ALLOWED_USER_IDS / DISCORD_ALLOWED_CHANNEL_IDS: comma-separated allowlists (optional)
+DISCORD_BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or "").strip()
+ENABLE_DISCORD_BOT = os.getenv("ENABLE_DISCORD_BOT", "0") == "1" or bool(DISCORD_BOT_TOKEN)
+DISCORD_DM_ONLY = os.getenv("DISCORD_DM_ONLY", "1") == "1"
+DISCORD_ALLOWED_USER_IDS = set(
+    [s.strip() for s in (os.getenv("DISCORD_ALLOWED_USER_IDS") or "").split(",") if s.strip()]
+)
+DISCORD_ALLOWED_CHANNEL_IDS = set(
+    [s.strip() for s in (os.getenv("DISCORD_ALLOWED_CHANNEL_IDS") or "").split(",") if s.strip()]
+)
+
 
 
 # ====== Flask session (for dashboard login) ======
@@ -917,7 +935,245 @@ def line_reply(reply_token: str, message: str):
     return line_reply_messages(reply_token, [{"type": "text", "text": message}])
 
 
+
+
+# ====== Discord bot bridge (optional) ======
+_discord_client = None
+_discord_loop = None
+_discord_ready = threading.Event()
+
+def _discord_enabled() -> bool:
+    return bool(ENABLE_DISCORD_BOT and DISCORD_BOT_TOKEN)
+
+def _is_discord_id(user_id: str) -> bool:
+    return bool(user_id) and str(user_id).isdigit()
+
+def _chunk_text(text: str, limit: int = 1800) -> list[str]:
+    # Discord hard limit is 2000 chars; keep some buffer
+    text = text or ""
+    if len(text) <= limit:
+        return [text]
+    out = []
+    s = text
+    while s:
+        out.append(s[:limit])
+        s = s[limit:]
+    return out
+
+
+def _find_first_uri(obj):
+    try:
+        if isinstance(obj, dict):
+            uri = obj.get("uri")
+            if isinstance(uri, str) and uri.startswith("http"):
+                return uri
+            for v in obj.values():
+                u = _find_first_uri(v)
+                if u:
+                    return u
+        elif isinstance(obj, list):
+            for v in obj:
+                u = _find_first_uri(v)
+                if u:
+                    return u
+    except Exception:
+        return None
+    return None
+
+def _discord_plain_text(out) -> str:
+    # Convert LINE-style reply payload to text for Discord
+    if out is None:
+        return ""
+    if isinstance(out, str):
+        return out
+    if isinstance(out, dict):
+        if out.get("type") == "text":
+            return out.get("text") or ""
+        if out.get("type") == "flex":
+            uri = _find_first_uri(out)
+            if uri:
+                return (out.get("altText") or "(flex)") + "\n" + uri
+            return out.get("altText") or ""
+        return out.get("altText") or ""
+    if isinstance(out, list):
+        parts = []
+        for m in out:
+            if isinstance(m, str):
+                parts.append(m)
+            elif isinstance(m, dict):
+                mtype = m.get("type")
+                if mtype == "text":
+                    parts.append(m.get("text") or "")
+                elif mtype == "image":
+                    parts.append(m.get("originalContentUrl") or m.get("previewImageUrl") or "")
+                elif mtype == "flex":
+                    uri = _find_first_uri(m)
+                    if uri:
+                        parts.append((m.get("altText") or "(flex)") + "\n" + uri)
+                    else:
+                        parts.append(m.get("altText") or "(flex)")
+                else:
+                    # fallback
+                    parts.append(m.get("altText") or m.get("text") or f"({mtype})")
+            else:
+                parts.append(str(m))
+        return "\n\n".join([p for p in parts if p])
+    return str(out)
+
+async def _discord_send_text_async(user_id_int: int, text: str):
+    import discord  # local import to keep optional dependency
+    global _discord_client
+    if not _discord_client:
+        raise RuntimeError("Discord client not ready")
+    user = await _discord_client.fetch_user(user_id_int)
+    for chunk in _chunk_text(text):
+        if chunk.strip() == "":
+            continue
+        await user.send(chunk)
+
+async def _discord_send_messages_async(user_id_int: int, messages: list[dict]):
+    # Best-effort conversion of LINE push payloads to Discord DM
+    txt = _discord_plain_text(messages)
+    if txt:
+        await _discord_send_text_async(user_id_int, txt)
+
+def discord_send_messages(to_user_id: str, messages: list[dict]):
+    global _discord_loop
+    if not _discord_enabled():
+        raise RuntimeError("Discord bridge disabled")
+    if not _discord_loop or not _discord_ready.is_set():
+        raise RuntimeError("Discord loop not ready")
+    uid = int(str(to_user_id))
+    fut = asyncio.run_coroutine_threadsafe(_discord_send_messages_async(uid, messages), _discord_loop)
+    return fut.result(timeout=15)
+
+def discord_send_text(to_user_id: str, text: str):
+    global _discord_loop
+    if not _discord_enabled():
+        raise RuntimeError("Discord bridge disabled")
+    if not _discord_loop or not _discord_ready.is_set():
+        raise RuntimeError("Discord loop not ready")
+    uid = int(str(to_user_id))
+    fut = asyncio.run_coroutine_threadsafe(_discord_send_text_async(uid, text), _discord_loop)
+    return fut.result(timeout=15)
+
+def start_discord_bot():
+    """Start Discord bot in a background thread (non-blocking).
+
+    Notes:
+    - Requires ENABLE_DISCORD_BOT=1 or DISCORD_BOT_TOKEN set.
+    - If you run gunicorn with multiple workers, each worker would start a bot.
+      Keep workers=1 for single-instance deployments.
+    """
+    global _discord_client, _discord_loop
+
+    if not _discord_enabled():
+        logger.info("[DISCORD] disabled (no token / ENABLE_DISCORD_BOT=0)")
+        return
+
+    if _discord_client is not None:
+        return  # already started
+
+    import discord  # local import
+    intents = discord.Intents.default()
+    intents.message_content = True  # requires enabling Message Content Intent in Developer Portal
+    intents.messages = True
+    intents.dm_messages = True
+
+    client = discord.Client(intents=intents)
+    _discord_client = client
+
+    @client.event
+    async def on_ready():
+        _discord_ready.set()
+        logger.info("[DISCORD] logged in as %s", getattr(client.user, "name", "unknown"))
+
+    @client.event
+    async def on_message(message: "discord.Message"):
+        try:
+            if message.author.bot:
+                return
+
+            uid = str(message.author.id)
+            if DISCORD_ALLOWED_USER_IDS and uid not in DISCORD_ALLOWED_USER_IDS:
+                return
+
+            # DM-only by default (safer), unless explicitly allowed
+            if message.guild is not None:
+                if DISCORD_DM_ONLY:
+                    return
+                if DISCORD_ALLOWED_CHANNEL_IDS and str(message.channel.id) not in DISCORD_ALLOWED_CHANNEL_IDS:
+                    return
+
+            display_name = getattr(message.author, "display_name", None) or getattr(message.author, "name", "") or ""
+
+            # handle image attachments
+            if message.attachments:
+                for i, att in enumerate(message.attachments):
+                    ctype = (getattr(att, "content_type", None) or "").lower()
+                    if not ctype.startswith("image/"):
+                        continue
+                    data = await att.read()
+                    ext = _ext_from_content_type(ctype or None)  # uses existing helper
+                    message_id = f"discord_{message.id}_{i}"
+                    filename = f"{message_id}{ext}"
+                    filepath = MEDIA_DIR / filename
+                    filepath.write_bytes(data)
+
+                    save_media_record(
+                        db_path=LOVE_DB_PATH,
+                        message_id=message_id,
+                        filename=filename,
+                        content_type=ctype or "image/*",
+                        from_user_id=uid,
+                        created_at=_iso_now(),
+                    )
+                    ok, note = forward_image_to_other_party(
+                        sender_user_id=uid,
+                        sender_name=display_name or "對方",
+                        message_id=message_id,
+                    )
+                    await message.channel.send("✅ 收到照片了，我已經幫你轉送給對方。" if ok else f"✅ 收到照片了，但目前無法轉送（{note}）。")
+
+            content = (message.content or "").strip()
+            if not content:
+                return
+
+            upsert_activity(uid, display_name, preview=content)  # reuse existing tracking
+            out = handle_command(uid, content)
+            txt = _discord_plain_text(out)
+            if txt:
+                for chunk in _chunk_text(txt):
+                    await message.channel.send(chunk)
+        except Exception as e:
+            logger.exception("[DISCORD] on_message error: %s", str(e))
+
+    def _runner():
+        global _discord_loop
+        _discord_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_discord_loop)
+        try:
+            _discord_loop.run_until_complete(client.start(DISCORD_BOT_TOKEN))
+        finally:
+            try:
+                _discord_loop.stop()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_runner, name="discord-bot", daemon=True)
+    t.start()
+    logger.info("[DISCORD] starting thread...")
+
+
 def line_push_messages(to_user_id: str, messages: list[dict]):
+    # Discord dispatch: if user_id is numeric, treat it as a Discord user ID and DM it.
+    if _discord_enabled() and _is_discord_id(to_user_id):
+        try:
+            discord_send_messages(to_user_id, messages)
+        except Exception as e:
+            logger.error("[DISCORD_PUSH][FAILED] to=%s err=%s", to_user_id, str(e))
+        return
+
     if not LINE_CHANNEL_ACCESS_TOKEN or not to_user_id:
         logger.warning("[LINE_PUSH][SKIP] token_missing=%s to_empty=%s", not bool(LINE_CHANNEL_ACCESS_TOKEN), not bool(to_user_id))
         return
@@ -2576,6 +2832,15 @@ if ENABLE_SCHEDULER:
         start_scheduler()
     except Exception as e:
         print("[SCHED] start_scheduler error:", e, flush=True)
+
+
+# ====== Discord autostart (optional) ======
+if ENABLE_DISCORD_BOT:
+    try:
+        start_discord_bot()
+    except Exception as e:
+        print("[DISCORD] start_discord_bot error:", e, flush=True)
+
 
 
 # ====== routes ======
