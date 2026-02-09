@@ -84,6 +84,8 @@ from db_love import (
     mark_conflict_cooldown_notified,
     create_game_session,
     get_game_week_stats,
+    list_game_sessions_since,
+    get_repair_week_stats,
 )
 
 
@@ -4655,6 +4657,27 @@ DASH_GAME_TEMPLATE = """<!doctype html>
     .stat{background:#f8fafc; border:1px solid #dbe3ef; border-radius:12px; padding:8px;}
     .note{margin-top:12px; font-size:12px; color:#475569;}
     .gate{padding:22px; background:#fff7ed; border:1px solid #fed7aa; color:#7c2d12; border-radius:16px;}
+    .section-title{font-size:16px; font-weight:800; margin-top:14px;}
+    .input,.select,.textarea{
+      width:100%; border:1px solid #cbd5e1; border-radius:10px; padding:8px 10px;
+      box-sizing:border-box; font:inherit; background:#fff;
+    }
+    .textarea{min-height:78px; resize:vertical;}
+    .btn-mini{
+      border:1px solid #cbd5e1; border-radius:10px; background:#fff; cursor:pointer;
+      padding:6px 10px; font-weight:700; color:#0f172a;
+    }
+    .pill{display:inline-block; border-radius:999px; padding:2px 8px; font-size:12px; font-weight:700;}
+    .pill-boss{background:#ffe4e6; color:#9f1239; border:1px solid #fecdd3;}
+    .pill-skill{background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe;}
+    .boss-panel{
+      position:absolute; left:12px; top:12px; right:12px; display:flex; justify-content:space-between; gap:10px; align-items:flex-start;
+      pointer-events:none;
+    }
+    .boss-left{background:rgba(255,255,255,.88); border:1px solid #dbe3ef; border-radius:12px; padding:8px 10px; max-width:72%;}
+    .cool-card{margin-top:10px; background:#fff7ed; border:1px solid #fed7aa; border-radius:12px; padding:10px;}
+    .progress{height:10px; background:#fed7aa; border-radius:999px; overflow:hidden;}
+    .progress > div{height:100%; width:0%; background:linear-gradient(90deg,#fb923c,#f97316);}
   </style>
 </head>
 <body>
@@ -4677,6 +4700,12 @@ DASH_GAME_TEMPLATE = """<!doctype html>
           <div class="arena" id="arena" title="點這裡也能攻擊">
             <div class="hitflash" id="hitFlash"></div>
             <div class="vignette"></div>
+            <div class="boss-panel">
+              <div class="boss-left">
+                <div><span class="pill pill-boss" id="bossName">Boss</span> <span class="pill pill-skill" id="bossSkill">技能</span></div>
+                <div class="muted" style="font-size:12px; margin-top:4px;" id="bossDesc">每日 Boss 描述</div>
+              </div>
+            </div>
             <div class="dummy stage0" id="dummy">
               <div class="head">
                 <div class="eye l"></div>
@@ -4725,14 +4754,69 @@ DASH_GAME_TEMPLATE = """<!doctype html>
             <div class="muted" style="font-size:12px;">效果設定</div>
             <label style="display:block; margin-top:8px;"><input id="soundToggle" type="checkbox" checked /> 音效</label>
             <label style="display:block; margin-top:4px;"><input id="vibeToggle" type="checkbox" checked /> 震動（手機）</label>
+            <label style="display:block; margin-top:8px; font-size:12px;">音效包
+              <select class="select" id="soundPack" style="margin-top:4px;">
+                <option value="arcade">街機包</option>
+                <option value="comic">漫畫包</option>
+                <option value="soft">柔和包</option>
+              </select>
+            </label>
+            <label style="display:block; margin-top:8px; font-size:12px;">震動包
+              <select class="select" id="vibePack" style="margin-top:4px;">
+                <option value="normal">標準</option>
+                <option value="heavy">重擊</option>
+                <option value="light">輕量</option>
+              </select>
+            </label>
           </div>
           <div class="stat" style="margin-top:10px;">
             <div class="muted" style="font-size:12px;">KO 任務獎勵（導向修復）</div>
             <div id="rewardList" style="margin-top:8px; font-size:13px;"></div>
           </div>
+          <div class="stat" style="margin-top:10px;">
+            <div class="muted" style="font-size:12px;">6) 對方視角卡</div>
+            <div id="perspectiveCard" style="margin-top:8px; font-size:13px;">點按鈕抽一張卡</div>
+            <button class="btn-mini" id="perspectiveBtn" style="margin-top:8px;">抽卡</button>
+          </div>
+          <div class="stat" style="margin-top:10px;">
+            <div class="muted" style="font-size:12px;">7) 道具收集（Skin）</div>
+            <div id="skinList" style="margin-top:8px; font-size:13px;"></div>
+            <div style="margin-top:8px;">
+              <select class="select" id="skinSelect"></select>
+            </div>
+          </div>
+          <div class="stat" style="margin-top:10px;">
+            <div class="muted" style="font-size:12px;">8) 每週紓壓報告</div>
+            <div id="weeklyReport" style="margin-top:8px; font-size:13px;"></div>
+          </div>
+          <div class="stat" style="margin-top:10px;">
+            <div class="muted" style="font-size:12px;">9) 雙人和解挑戰（本週）</div>
+            <div id="repairChallenge" style="margin-top:8px; font-size:13px;"></div>
+          </div>
           <div class="note">
             說明：純虛擬紓壓遊戲，不鼓勵現實暴力。<br/>
             你現在看到的是「受傷分段」版本：黑眼圈、腫包、OK 繃都會隨血量出現。
+          </div>
+
+          <div class="section-title">3) 情緒轉譯</div>
+          <div class="muted" style="font-size:12px;">把原始怒氣轉成可以說出口的請求句。</div>
+          <textarea class="textarea" id="rawEmotionInput" placeholder="例如：你每次都不回我，我真的超火。"></textarea>
+          <button class="btn-mini" id="translateBtn" style="margin-top:8px;">轉譯成需求</button>
+          <div class="stat" id="translateOut" style="margin-top:8px; font-size:13px;">尚未轉譯</div>
+
+          <div class="section-title">4) 語氣練習場</div>
+          <div class="muted" style="font-size:12px;">同一句話三種語氣，練習修復版。</div>
+          <input class="input" id="toneInput" placeholder="輸入一句你想說的話" />
+          <button class="btn-mini" id="toneBtn" style="margin-top:8px;">生成三種語氣</button>
+          <div class="stat" id="toneOut" style="margin-top:8px; font-size:13px;">尚未生成</div>
+
+          <div class="section-title">5) 冷卻挑戰（30 秒）</div>
+          <div class="cool-card">
+            <div class="muted" style="font-size:12px;">跟著節奏呼吸 30 秒，完成後解鎖修復語句。</div>
+            <div id="coolHint" style="margin-top:6px; font-weight:800;">尚未開始</div>
+            <div class="progress" style="margin-top:8px;"><div id="coolProgress"></div></div>
+            <button class="btn-mini" id="coolStartBtn" style="margin-top:8px;">開始冷卻挑戰</button>
+            <div class="stat" id="coolOut" style="margin-top:8px; font-size:13px;">未解鎖</div>
           </div>
         </div>
       </div>
@@ -4744,6 +4828,22 @@ DASH_GAME_TEMPLATE = """<!doctype html>
     (() => {
       const STORAGE_KEY = "dash_stress_game_v2";
       const rewardDefs = {{ game_rewards_json|safe }};
+      const weeklyReportSeed = {{ weekly_report_json|safe }};
+      const repairChallengeSeed = {{ repair_challenge_json|safe }};
+      const perspectiveCards = {{ perspective_cards_json|safe }};
+      const skins = [
+        { id: "classic", name: "經典藍", needKo: 0, body: "#76a9ff" },
+        { id: "mint", name: "薄荷綠", needKo: 2, body: "#5fd0b7" },
+        { id: "sunset", name: "夕陽橘", needKo: 4, body: "#ff9b6b" },
+        { id: "neon", name: "霓虹粉", needKo: 7, body: "#f472b6" },
+        { id: "boss", name: "魔王黑", needKo: 10, body: "#64748b" }
+      ];
+      const bosses = [
+        { id: "read_ghost", name: "已讀不回魔王", skill: "冷場護盾", desc: "前 3 秒攻擊減傷 25%", armor: 0.25, rageAt: 0.35 },
+        { id: "schedule_chaos", name: "臨改行程魔王", skill: "混亂步伐", desc: "每第 4 下傷害波動", armor: 0.10, rageAt: 0.4 },
+        { id: "tone_sting", name: "口氣刺刺魔王", skill: "反彈情緒", desc: "高連擊時更容易觸發爆擊", armor: 0.12, rageAt: 0.28 },
+        { id: "joke_over", name: "玩笑過頭魔王", skill: "厚臉皮", desc: "血量越低越耐打", armor: 0.08, rageAt: 0.22 }
+      ];
       const tools = [
         { id: "pillow", name: "軟枕頭", min: 6, max: 12, fx: "啪！", shake: 1 },
         { id: "slipper", name: "拖鞋", min: 10, max: 18, fx: "咻啪！", shake: 1.25 },
@@ -4767,13 +4867,34 @@ DASH_GAME_TEMPLATE = """<!doctype html>
       const resetBtn = document.getElementById("resetBtn");
       const soundToggle = document.getElementById("soundToggle");
       const vibeToggle = document.getElementById("vibeToggle");
+      const soundPackEl = document.getElementById("soundPack");
+      const vibePackEl = document.getElementById("vibePack");
       const rewardList = document.getElementById("rewardList");
+      const perspectiveCard = document.getElementById("perspectiveCard");
+      const perspectiveBtn = document.getElementById("perspectiveBtn");
+      const skinList = document.getElementById("skinList");
+      const skinSelect = document.getElementById("skinSelect");
+      const weeklyReport = document.getElementById("weeklyReport");
+      const repairChallenge = document.getElementById("repairChallenge");
       const arena = document.getElementById("arena");
+      const bossNameEl = document.getElementById("bossName");
+      const bossSkillEl = document.getElementById("bossSkill");
+      const bossDescEl = document.getElementById("bossDesc");
       const hitFlash = document.getElementById("hitFlash");
       const dummy = document.getElementById("dummy");
       const fx = document.getElementById("fx");
       const stateLabel = document.getElementById("stateLabel");
       const toolsWrap = document.getElementById("tools");
+      const rawEmotionInput = document.getElementById("rawEmotionInput");
+      const translateBtn = document.getElementById("translateBtn");
+      const translateOut = document.getElementById("translateOut");
+      const toneInput = document.getElementById("toneInput");
+      const toneBtn = document.getElementById("toneBtn");
+      const toneOut = document.getElementById("toneOut");
+      const coolHint = document.getElementById("coolHint");
+      const coolProgress = document.getElementById("coolProgress");
+      const coolStartBtn = document.getElementById("coolStartBtn");
+      const coolOut = document.getElementById("coolOut");
 
       let state = {
         round: 1,
@@ -4787,8 +4908,14 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         lastHitTs: 0,
         soundOn: true,
         vibeOn: true,
-        toolHits: {}
+        toolHits: {},
+        activeBossId: "",
+        selectedSkin: "classic",
+        soundPack: "arcade",
+        vibePack: "normal"
       };
+      let coolTimer = null;
+      let coolEndsAt = 0;
 
       function pickTool() { return tools.find(t => t.id === state.selectedTool) || tools[0]; }
       function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
@@ -4800,6 +4927,24 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         if (r > 0.35) return 2;
         if (r > 0.15) return 3;
         return 4;
+      }
+
+      function pickDailyBoss() {
+        const d = new Date();
+        const key = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+        return bosses[key % bosses.length];
+      }
+
+      function getBoss() {
+        const b = bosses.find(x => x.id === state.activeBossId);
+        return b || bosses[0];
+      }
+
+      function renderBoss() {
+        const b = getBoss();
+        bossNameEl.textContent = "Boss：" + b.name;
+        bossSkillEl.textContent = b.skill;
+        bossDescEl.textContent = b.desc;
       }
 
       function renderRewards() {
@@ -4816,6 +4961,52 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         }
       }
 
+      function renderPerspectiveCard(text) {
+        perspectiveCard.innerHTML = text || "點按鈕抽一張卡";
+      }
+
+      function renderSkins() {
+        skinSelect.innerHTML = "";
+        const unlocked = skins.filter(s => state.koCount >= s.needKo);
+        skinList.innerHTML = skins.map(s => {
+          const ok = state.koCount >= s.needKo;
+          return (ok ? "✅ " : "🔒 ") + s.name + "（KO " + s.needKo + "）";
+        }).join("<br/>");
+
+        for (const s of unlocked) {
+          const opt = document.createElement("option");
+          opt.value = s.id;
+          opt.textContent = s.name;
+          skinSelect.appendChild(opt);
+        }
+        if (!unlocked.some(s => s.id === state.selectedSkin)) {
+          state.selectedSkin = unlocked.length ? unlocked[0].id : "classic";
+        }
+        skinSelect.value = state.selectedSkin;
+        const cur = skins.find(s => s.id === state.selectedSkin) || skins[0];
+        const bodyEl = dummy.querySelector(".body");
+        if (bodyEl) bodyEl.style.backgroundColor = cur.body;
+      }
+
+      function renderWeeklyReport() {
+        weeklyReport.innerHTML =
+          "摘要：" + (weeklyReportSeed.summary || "無") + "<br/>" +
+          "平均傷害：" + Number(weeklyReportSeed.avg_damage || 0) + "<br/>" +
+          "最常用道具：" + (weeklyReportSeed.top_tool || "無") + "<br/>" +
+          "最高回合：" + Number(weeklyReportSeed.max_round || 0);
+      }
+
+      function renderRepairChallenge() {
+        const goal = Number(repairChallengeSeed.goal || 3);
+        const p = Number(repairChallengeSeed.progress || 0);
+        const done = !!repairChallengeSeed.done;
+        repairChallenge.innerHTML =
+          (done ? "🏁 已完成！" : "進度中") + "<br/>" +
+          "本週已完成修復：" + p + " / " + goal + "<br/>" +
+          (done ? "可解鎖雙人徽章。"
+                : "目標：本週完成 3 次『有吵但有修復』");
+      }
+
       function beep(freq, duration, type) {
         if (!state.soundOn) return;
         try {
@@ -4824,8 +5015,17 @@ DASH_GAME_TEMPLATE = """<!doctype html>
           const ctx = new Ctx();
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();
-          osc.type = type || "square";
-          osc.frequency.value = freq;
+          let f = freq;
+          let wave = type || "square";
+          if (state.soundPack === "comic") {
+            f = Math.floor(freq * 1.2);
+            wave = "triangle";
+          } else if (state.soundPack === "soft") {
+            f = Math.floor(freq * 0.85);
+            wave = "sine";
+          }
+          osc.type = wave;
+          osc.frequency.value = f;
           gain.gain.value = 0.0001;
           osc.connect(gain);
           gain.connect(ctx.destination);
@@ -4840,7 +5040,18 @@ DASH_GAME_TEMPLATE = """<!doctype html>
 
       function pulseVibe(ms) {
         if (!state.vibeOn) return;
-        try { if (navigator.vibrate) navigator.vibrate(ms); } catch (_) {}
+        try {
+          if (!navigator.vibrate) return;
+          if (state.vibePack === "heavy") {
+            if (Array.isArray(ms)) navigator.vibrate(ms.map(v => Math.round(v * 1.5)));
+            else navigator.vibrate(Math.round(Number(ms || 0) * 1.5));
+          } else if (state.vibePack === "light") {
+            if (Array.isArray(ms)) navigator.vibrate(ms.map(v => Math.max(5, Math.round(v * 0.6))));
+            else navigator.vibrate(Math.max(5, Math.round(Number(ms || 0) * 0.6)));
+          } else {
+            navigator.vibrate(ms);
+          }
+        } catch (_) {}
       }
 
       async function saveReport(reason) {
@@ -4866,7 +5077,57 @@ DASH_GAME_TEMPLATE = """<!doctype html>
             weekKoEl.textContent = String(out.week_stats.sum_ko || 0);
             weekMaxComboEl.textContent = String(out.week_stats.max_combo || 0);
           }
+          if (out.challenge) {
+            repairChallengeSeed.goal = Number(out.challenge.goal || 3);
+            repairChallengeSeed.progress = Number(out.challenge.progress || 0);
+            repairChallengeSeed.done = !!out.challenge.done;
+            renderRepairChallenge();
+          }
         } catch (_) {}
+      }
+
+      function buildTranslation(raw) {
+        const t = (raw || "").trim();
+        if (!t) return "請先輸入你原本想說的話。";
+        const feeling = "我現在感到委屈 / 生氣，心裡有壓力。";
+        const need = "我需要先被理解，再一起討論怎麼改善。";
+        const request = "你可以先回我一句『我有在聽』，然後我們 10 分鐘後再聊嗎？";
+        return "感受：" + feeling + "<br/>需求：" + need + "<br/>請求：" + request + "<br/><span class='muted'>原句摘要：" + t.slice(0, 40) + (t.length > 40 ? "…" : "") + "</span>";
+      }
+
+      function buildToneVariants(raw) {
+        const t = (raw || "").trim();
+        if (!t) return "請先輸入一句話。";
+        const sharp = "刺傷版：你這樣真的很誇張，我受夠了。";
+        const neutral = "中性版：這件事讓我不太舒服，我想確認一下。";
+        const repair = "修復版：剛剛那段我有被刺到，可以先聽我 1 分鐘嗎？我希望我們一起把它講好。";
+        return sharp + "<br/>" + neutral + "<br/><strong>" + repair + "</strong>";
+      }
+
+      function startCooldownChallenge() {
+        if (coolTimer) return;
+        const durationMs = 30000;
+        coolEndsAt = Date.now() + durationMs;
+        coolHint.textContent = "吸氣 4 秒 / 吐氣 4 秒，跟著節奏。";
+        coolOut.innerHTML = "進行中…";
+        coolProgress.style.width = "0%";
+        let tick = 0;
+        coolTimer = setInterval(() => {
+          const left = Math.max(0, coolEndsAt - Date.now());
+          const done = Math.min(100, Math.round((1 - left / durationMs) * 100));
+          coolProgress.style.width = done + "%";
+          tick += 1;
+          const phase = Math.floor((durationMs - left) / 4000) % 2;
+          coolHint.textContent = phase === 0 ? "吸氣 4 秒" : "吐氣 4 秒";
+          if (left <= 0) {
+            clearInterval(coolTimer);
+            coolTimer = null;
+            coolHint.textContent = "完成！現在適合進入修復對話。";
+            coolOut.innerHTML = "已解鎖修復語句：<strong>我先不爭輸贏，我想把我們修好。</strong><br/><a href='/dash/repair'>前往修復中心</a>";
+            beep(260, 120, "sine");
+            pulseVibe([25, 20, 30]);
+          }
+        }, 200);
       }
 
       function renderTools() {
@@ -4891,7 +5152,11 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         koCountEl.textContent = state.koCount;
         stateLabel.textContent = "狀態：" + stageNames[stage];
         dummy.className = "dummy stage" + stage + (dummy.classList.contains("downed") ? " downed" : "");
+        renderBoss();
         renderRewards();
+        renderSkins();
+        renderWeeklyReport();
+        renderRepairChallenge();
 
         if (ratio > 0.6) hpBar.style.background = "linear-gradient(90deg, #22c55e, #86efac)";
         else if (ratio > 0.3) hpBar.style.background = "linear-gradient(90deg, #f59e0b, #fcd34d)";
@@ -4948,6 +5213,7 @@ DASH_GAME_TEMPLATE = """<!doctype html>
           state.hpMax = 100 + (state.round - 1) * 18;
           state.hp = state.hpMax;
           state.combo = 1;
+          state.activeBossId = pickDailyBoss().id;
           dummy.classList.remove("downed");
           render();
           save();
@@ -4956,22 +5222,51 @@ DASH_GAME_TEMPLATE = """<!doctype html>
 
       function hit() {
         const now = Date.now();
-        if (now - state.lastHitTs <= 1300) state.combo = Math.min(15, state.combo + 1);
+        const prevHitTs = state.lastHitTs || 0;
+        if (now - prevHitTs <= 1300) state.combo = Math.min(15, state.combo + 1);
         else state.combo = 1;
         if (state.combo > state.maxCombo) state.maxCombo = state.combo;
         state.lastHitTs = now;
 
         const tool = pickTool();
-        const crit = Math.random() < 0.2;
+        const boss = getBoss();
+        let critChance = 0.2;
+        if (boss.id === "tone_sting" && state.combo >= 6) critChance += 0.12;
+        const crit = Math.random() < critChance;
         const base = randInt(tool.min, tool.max);
         const comboMul = 1 + (state.combo - 1) * 0.09;
         const critMul = crit ? 1.6 : 1.0;
-        const dmg = Math.max(1, Math.floor(base * comboMul * critMul));
+        let dmg = Math.max(1, Math.floor(base * comboMul * critMul));
+
+        // 2) combo special moves
+        let comboFx = "";
+        if (state.combo === 5) {
+          dmg += 10;
+          comboFx = "連擊技：直球重擊";
+        } else if (state.combo === 10) {
+          dmg += 18;
+          comboFx = "連擊技：颶風連環";
+        } else if (state.combo >= 15) {
+          dmg += 28;
+          comboFx = "連擊技：終結爆發";
+        }
+
+        // 1) boss mode resist/skill
+        if (boss.id === "read_ghost" && now - prevHitTs < 3000) {
+          dmg = Math.max(1, Math.floor(dmg * (1 - boss.armor)));
+        } else if (boss.id === "schedule_chaos" && (state.combo % 4 === 0)) {
+          dmg = Math.max(1, Math.floor(dmg * 0.7));
+        } else if (boss.id === "joke_over") {
+          const r = hpRatio();
+          if (r <= boss.rageAt) dmg = Math.max(1, Math.floor(dmg * 0.75));
+        } else {
+          dmg = Math.max(1, Math.floor(dmg * (1 - boss.armor * 0.4)));
+        }
         state.toolHits[tool.id] = Number(state.toolHits[tool.id] || 0) + 1;
 
         state.hp = Math.max(0, state.hp - dmg);
         state.totalDamage += dmg;
-        showFx(crit ? "爆擊!" : tool.fx, crit);
+        showFx(comboFx || (crit ? "爆擊!" : tool.fx), crit || !!comboFx);
         beep(crit ? 520 : 360, crit ? 130 : 90, crit ? "square" : "triangle");
         pulseVibe(crit ? [24, 16, 24] : 18);
         floatDamage(dmg, crit);
@@ -5000,7 +5295,8 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         }
         state = {
           round: 1, hpMax: 100, hp: 100, totalDamage: 0, combo: 1, maxCombo: 1, koCount: 0,
-          selectedTool: "pillow", lastHitTs: 0, soundOn: true, vibeOn: true, toolHits: {}
+          selectedTool: "pillow", lastHitTs: 0, soundOn: true, vibeOn: true, toolHits: {}, activeBossId: pickDailyBoss().id,
+          selectedSkin: "classic", soundPack: "arcade", vibePack: "normal"
         };
         renderTools();
         render();
@@ -5022,18 +5318,48 @@ DASH_GAME_TEMPLATE = """<!doctype html>
           if (typeof state.soundOn !== "boolean") state.soundOn = true;
           if (typeof state.vibeOn !== "boolean") state.vibeOn = true;
           if (!state.toolHits || typeof state.toolHits !== "object") state.toolHits = {};
+          if (!state.activeBossId || !bosses.some(b => b.id === state.activeBossId)) {
+            state.activeBossId = pickDailyBoss().id;
+          }
+          if (!state.selectedSkin) state.selectedSkin = "classic";
+          if (!state.soundPack) state.soundPack = "arcade";
+          if (!state.vibePack) state.vibePack = "normal";
         } catch (_) {}
       }
 
       hitBtn.addEventListener("click", hit);
       healBtn.addEventListener("click", heal);
       resetBtn.addEventListener("click", reset);
+      translateBtn.addEventListener("click", () => {
+        translateOut.innerHTML = buildTranslation(rawEmotionInput.value);
+      });
+      toneBtn.addEventListener("click", () => {
+        toneOut.innerHTML = buildToneVariants(toneInput.value);
+      });
+      coolStartBtn.addEventListener("click", startCooldownChallenge);
+      perspectiveBtn.addEventListener("click", () => {
+        const idx = Math.floor(Math.random() * perspectiveCards.length);
+        renderPerspectiveCard(perspectiveCards[idx] || "先安撫，再溝通。");
+      });
+      skinSelect.addEventListener("change", () => {
+        state.selectedSkin = skinSelect.value || "classic";
+        renderSkins();
+        save();
+      });
       soundToggle.addEventListener("change", () => {
         state.soundOn = !!soundToggle.checked;
         save();
       });
       vibeToggle.addEventListener("change", () => {
         state.vibeOn = !!vibeToggle.checked;
+        save();
+      });
+      soundPackEl.addEventListener("change", () => {
+        state.soundPack = soundPackEl.value || "arcade";
+        save();
+      });
+      vibePackEl.addEventListener("change", () => {
+        state.vibePack = vibePackEl.value || "normal";
         save();
       });
       arena.addEventListener("click", (e) => {
@@ -5044,10 +5370,14 @@ DASH_GAME_TEMPLATE = """<!doctype html>
       });
 
       load();
+      if (!state.activeBossId) state.activeBossId = pickDailyBoss().id;
       soundToggle.checked = !!state.soundOn;
       vibeToggle.checked = !!state.vibeOn;
+      soundPackEl.value = state.soundPack || "arcade";
+      vibePackEl.value = state.vibePack || "normal";
       renderTools();
       render();
+      renderPerspectiveCard("抽一張卡，看看對方可能在想什麼。");
     })();
   </script>
   {% endif %}
@@ -5936,6 +6266,49 @@ def dash_game():
     week_stats = get_game_week_stats(db_path=LOVE_DB_PATH, user_id=uid) if allow_play else {"plays": 0, "sum_ko": 0, "sum_damage": 0, "max_combo": 0}
     rewards = _game_rewards_for_ko(int(week_stats.get("sum_ko") or 0))
 
+    report = {
+        "avg_damage": 0,
+        "top_tool": "無",
+        "max_round": 0,
+        "summary": "本週還沒有遊戲資料。",
+    }
+    repair_week = {"closed_count": 0, "open_count": 0, "high_intensity_count": 0}
+    challenge = {"goal": 3, "progress": 0, "done": False}
+    if allow_play:
+        sessions = list_game_sessions_since(db_path=LOVE_DB_PATH, user_id=uid, days=7, limit=500)
+        if sessions:
+            tool_counter: dict[str, int] = {}
+            max_round = 0
+            for s in sessions:
+                max_round = max(max_round, int(s.get("round_reached") or 0))
+                tb_raw = s.get("tool_breakdown") or ""
+                if tb_raw:
+                    try:
+                        tb = json.loads(tb_raw)
+                        if isinstance(tb, dict):
+                            for k, v in tb.items():
+                                kk = (str(k) or "").strip()
+                                if kk:
+                                    tool_counter[kk] = tool_counter.get(kk, 0) + int(v or 0)
+                    except Exception:
+                        pass
+            top_tool = "無"
+            if tool_counter:
+                top_tool = sorted(tool_counter.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+            plays = int(week_stats.get("plays") or 0)
+            sum_damage = int(week_stats.get("sum_damage") or 0)
+            avg_damage = int(round(sum_damage / plays)) if plays > 0 else 0
+            report = {
+                "avg_damage": avg_damage,
+                "top_tool": top_tool,
+                "max_round": max_round,
+                "summary": f"本週玩了 {plays} 場，總 KO {int(week_stats.get('sum_ko') or 0)} 次。",
+            }
+
+        repair_week = get_repair_week_stats(db_path=LOVE_DB_PATH, user_id=uid)
+        challenge["progress"] = int(repair_week.get("closed_count") or 0)
+        challenge["done"] = challenge["progress"] >= challenge["goal"]
+
     return render_template_string(
         DASH_GAME_TEMPLATE,
         **base,
@@ -5944,6 +6317,15 @@ def dash_game():
         allow_play=allow_play,
         week_stats=week_stats,
         game_rewards_json=json.dumps(rewards, ensure_ascii=False),
+        weekly_report_json=json.dumps(report, ensure_ascii=False),
+        repair_challenge_json=json.dumps(challenge, ensure_ascii=False),
+        perspective_cards_json=json.dumps([
+            "對方可能在怕：你是不是已經不想聽我說了。",
+            "對方可能在想：我不是要贏，我只是想被在乎。",
+            "對方可能在卡：語氣比內容更刺痛。",
+            "對方可能需要：先被安撫，再談道理。",
+            "對方可能擔心：這件事會不會又變成舊帳。"
+        ], ensure_ascii=False),
     )
 
 
@@ -5980,7 +6362,10 @@ def dash_game_report():
         )
         week_stats = get_game_week_stats(db_path=LOVE_DB_PATH, user_id=uid)
         rewards = _game_rewards_for_ko(int(ko_count))
-        return jsonify({"ok": True, "session_id": sid, "week_stats": week_stats, "rewards": rewards})
+        repair_week = get_repair_week_stats(db_path=LOVE_DB_PATH, user_id=uid)
+        challenge = {"goal": 3, "progress": int(repair_week.get("closed_count") or 0)}
+        challenge["done"] = challenge["progress"] >= challenge["goal"]
+        return jsonify({"ok": True, "session_id": sid, "week_stats": week_stats, "rewards": rewards, "challenge": challenge})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 

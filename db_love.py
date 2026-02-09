@@ -1701,3 +1701,54 @@ def get_game_week_stats(db_path: str, user_id: str) -> dict:
         }
     finally:
         conn.close()
+
+
+def list_game_sessions_since(db_path: str, user_id: str, days: int = 7, limit: int = 500) -> list[dict]:
+    uid = (user_id or "").strip()
+    if not uid:
+        return []
+    days = max(1, min(90, int(days)))
+    limit = max(1, min(2000, int(limit)))
+    since = (datetime.datetime.now(_tz()) - datetime.timedelta(days=days)).isoformat(timespec="seconds")
+    conn = _conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, user_id, target_user_id, total_damage, max_combo, ko_count, round_reached, tool_breakdown, created_at
+            FROM game_sessions
+            WHERE user_id=? AND created_at>=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (uid, since, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_repair_week_stats(db_path: str, user_id: str) -> dict:
+    uid = (user_id or "").strip()
+    if not uid:
+        return {"closed_count": 0, "open_count": 0, "high_intensity_count": 0}
+    since = (datetime.datetime.now(_tz()) - datetime.timedelta(days=7)).isoformat(timespec="seconds")
+    conn = _conn(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN closed_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS closed_count,
+                COALESCE(SUM(CASE WHEN closed_at IS NULL THEN 1 ELSE 0 END), 0) AS open_count,
+                COALESCE(SUM(CASE WHEN intensity>=4 THEN 1 ELSE 0 END), 0) AS high_intensity_count
+            FROM conflict_events
+            WHERE (created_by=? OR target_user_id=?) AND created_at>=?
+            """,
+            (uid, uid, since),
+        ).fetchone()
+        return {
+            "closed_count": int(row["closed_count"] or 0),
+            "open_count": int(row["open_count"] or 0),
+            "high_intensity_count": int(row["high_intensity_count"] or 0),
+        }
+    finally:
+        conn.close()
