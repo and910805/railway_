@@ -4499,7 +4499,7 @@ DASH_GAME_TEMPLATE = """<!doctype html>
   <style>
     :root{
       --bg:#f8fafc; --card:#ffffff; --line:#dbe3ef; --text:#0f172a; --muted:#475569;
-      --pink:#ff6fae; --blue:#2f6bff; --mint:#23b19d; --orange:#ff8a4c;
+      --pink:#ff4d8d; --blue:#2f6bff; --orange:#ff8a4c;
     }
     body{margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans TC","Helvetica Neue",Arial;}
     .wrap{max-width:1080px; margin:0 auto; padding:20px 16px 32px;}
@@ -4508,33 +4508,120 @@ DASH_GAME_TEMPLATE = """<!doctype html>
     .card{background:var(--card); border:1px solid var(--line); border-radius:20px; padding:16px; box-shadow:0 8px 24px rgba(15,23,42,.06);}
     .grid{display:grid; grid-template-columns:1fr; gap:16px; margin-top:16px;}
     @media (min-width: 920px){ .grid{grid-template-columns:1.2fr 1fr;} }
-    .arena{position:relative; min-height:420px; overflow:hidden; background:
-      radial-gradient(circle at 20% 15%, #ffe0f0 0, #ffe0f0 12%, transparent 13%),
-      radial-gradient(circle at 78% 20%, #d7e7ff 0, #d7e7ff 14%, transparent 15%),
-      linear-gradient(180deg, #fff7fc 0%, #f7fbff 55%, #ecf4ff 100%);
-      border-radius:18px; border:1px solid #e5e7eb;
+
+    .arena{
+      position:relative; min-height:430px; overflow:hidden; border-radius:18px; border:1px solid #e5e7eb;
+      background:
+        radial-gradient(circle at 22% 16%, #ffe0f0 0, #ffe0f0 11%, transparent 12%),
+        radial-gradient(circle at 78% 20%, #d7e7ff 0, #d7e7ff 12%, transparent 13%),
+        linear-gradient(180deg, #fff7fc 0%, #f7fbff 55%, #ecf4ff 100%);
+      cursor:pointer;
     }
-    .dummy{position:absolute; left:50%; top:54%; transform:translate(-50%,-50%); width:180px; text-align:center; user-select:none;}
-    .head{width:92px; height:92px; background:#ffd7bf; border:3px solid #334155; border-radius:50%; margin:0 auto; position:relative;}
-    .eye{position:absolute; top:34px; width:12px; height:12px; border-radius:50%; background:#111827;}
-    .eye.l{left:24px;} .eye.r{right:24px;}
-    .mouth{position:absolute; left:50%; top:56px; width:32px; height:14px; border-bottom:4px solid #111827; border-radius:0 0 30px 30px; transform:translateX(-50%);}
-    .body{width:128px; height:152px; background:#76a9ff; border:3px solid #334155; border-radius:22px; margin:8px auto 0;}
+    .arena .hitflash{
+      position:absolute; inset:0; pointer-events:none; opacity:0;
+      background:radial-gradient(circle, rgba(255,62,62,.35) 0%, rgba(255,62,62,.12) 32%, transparent 60%);
+      transition:opacity .09s linear;
+    }
+    .arena .vignette{
+      position:absolute; inset:0; pointer-events:none;
+      background:radial-gradient(ellipse at center, transparent 52%, rgba(15,23,42,.12) 100%);
+    }
+
+    .dummy{
+      position:absolute; left:50%; top:54%; transform:translate(-50%,-50%);
+      width:190px; text-align:center; user-select:none; transition:filter .16s linear;
+    }
+    .dummy.downed{filter:grayscale(.45) brightness(.9);}
+    .head{
+      width:100px; height:100px; background:#ffd7bf; border:3px solid #334155;
+      border-radius:50%; margin:0 auto; position:relative; overflow:hidden;
+      box-shadow:inset 0 -8px 0 rgba(0,0,0,.06);
+    }
+    .eye{
+      position:absolute; top:36px; width:12px; height:12px; border-radius:50%;
+      background:#111827; transition:all .12s linear;
+    }
+    .eye.l{left:25px;} .eye.r{right:25px;}
+    .mouth{
+      position:absolute; left:50%; top:60px; width:34px; height:12px;
+      border-bottom:4px solid #111827; border-radius:0 0 30px 30px;
+      transform:translateX(-50%); transition:all .12s linear;
+    }
+    .wound{position:absolute; opacity:0; transition:opacity .12s linear;}
+    .bruise{width:28px; height:18px; border-radius:50%; background:rgba(90,41,132,.45);}
+    .bruise.b1{left:12px; top:48px;}
+    .bruise.b2{right:10px; top:44px;}
+    .bump{left:46px; top:6px; width:18px; height:12px; border-radius:50%; background:#d45b73;}
+    .bandage{
+      right:8px; top:20px; width:22px; height:10px; border-radius:3px;
+      background:#f8e7bd; border:1px solid #e6d39b; transform:rotate(-20deg);
+    }
+    .sweat{
+      left:8px; top:24px; width:10px; height:18px; border-radius:10px;
+      background:rgba(80,160,255,.55); transform:rotate(8deg);
+    }
+    .body{
+      width:136px; height:156px; background:#76a9ff; border:3px solid #334155;
+      border-radius:22px; margin:8px auto 0; position:relative;
+      box-shadow:inset 0 -10px 0 rgba(0,0,0,.08);
+      transition:all .12s linear;
+    }
+    .body::after{
+      content:""; position:absolute; left:20px; top:36px; width:96px; height:2px;
+      background:rgba(255,255,255,.4); box-shadow:0 20px 0 rgba(255,255,255,.28), 0 40px 0 rgba(255,255,255,.2);
+    }
     .name{margin-top:8px; font-weight:800;}
-    .hp-wrap{margin:10px auto 0; max-width:360px;}
-    .hp-bg{height:16px; border-radius:999px; background:#e2e8f0; overflow:hidden;}
-    .hp-bar{height:100%; width:100%; background:linear-gradient(90deg, #ff5f8f, #ff8a4c); transition:width .12s linear;}
+    .state-label{
+      margin-top:4px; display:inline-block; font-size:12px; padding:2px 10px;
+      border-radius:999px; background:#e2e8f0; color:#334155; border:1px solid #cbd5e1;
+    }
+
+    .dummy.stage1 .sweat{opacity:1;}
+    .dummy.stage2 .sweat,.dummy.stage2 .bruise.b1{opacity:1;}
+    .dummy.stage3 .sweat,.dummy.stage3 .bruise{opacity:1;}
+    .dummy.stage3 .bandage{opacity:1;}
+    .dummy.stage3 .mouth{
+      border-bottom:0; border-top:4px solid #111827; border-radius:30px 30px 0 0; top:66px;
+    }
+    .dummy.stage4 .sweat,.dummy.stage4 .bruise,.dummy.stage4 .bump,.dummy.stage4 .bandage{opacity:1;}
+    .dummy.stage4 .head{background:#eec2ac;}
+    .dummy.stage4 .eye{
+      width:15px; height:4px; border-radius:4px; top:39px; background:#111827;
+    }
+    .dummy.stage4 .eye.l{transform:rotate(18deg);}
+    .dummy.stage4 .eye.r{transform:rotate(-18deg);}
+    .dummy.stage4 .body{
+      background:#6f97df;
+      background-image:linear-gradient(135deg, rgba(255,255,255,.15) 25%, transparent 25%, transparent 50%, rgba(255,255,255,.15) 50%, rgba(255,255,255,.15) 75%, transparent 75%, transparent);
+      background-size:16px 16px;
+    }
+
+    .fx{
+      position:absolute; left:50%; top:33%; transform:translate(-50%,-50%);
+      font-size:46px; font-weight:900; color:#be123c; opacity:0; pointer-events:none;
+      text-shadow:0 8px 16px rgba(0,0,0,.16);
+    }
+    .float{
+      position:absolute; font-weight:900; color:#be123c; pointer-events:none; animation:rise .72s ease-out forwards;
+      text-shadow:0 2px 4px rgba(0,0,0,.1);
+    }
+    @keyframes rise { from{transform:translateY(0) scale(1); opacity:1;} to{transform:translateY(-56px) scale(1.12); opacity:0;} }
+
+    .hp-wrap{margin:10px auto 0; max-width:420px;}
+    .hp-row{display:flex; justify-content:space-between; gap:10px; margin-bottom:6px;}
+    .hp-bg{height:18px; border-radius:999px; background:#e2e8f0; overflow:hidden; border:1px solid #cbd5e1;}
+    .hp-bar{height:100%; width:100%; background:linear-gradient(90deg, #22c55e, #86efac); transition:width .12s linear, background .12s linear;}
+
     .tools{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px;}
     .tool{border:1px solid #cbd5e1; background:#fff; padding:10px; border-radius:12px; cursor:pointer; text-align:left;}
     .tool.active{border-color:var(--blue); box-shadow:inset 0 0 0 1px var(--blue); background:#eff6ff;}
+
     .ctl{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
     .btn{border:0; border-radius:12px; padding:10px 14px; font-weight:800; cursor:pointer;}
     .btn-hit{background:var(--pink); color:#fff;}
     .btn-reset{background:#111827; color:#fff;}
     .btn-soft{background:#e2e8f0; color:#1f2937;}
-    .fx{position:absolute; left:50%; top:36%; transform:translate(-50%,-50%); font-size:40px; font-weight:900; color:#be123c; opacity:0; pointer-events:none; text-shadow:0 8px 16px rgba(0,0,0,.12);}
-    .float{position:absolute; font-weight:900; color:#be123c; pointer-events:none; animation:rise .65s ease-out forwards;}
-    @keyframes rise { from{transform:translateY(0); opacity:1;} to{transform:translateY(-48px); opacity:0;} }
+
     .stats{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px;}
     .stat{background:#f8fafc; border:1px solid #dbe3ef; border-radius:12px; padding:8px;}
     .note{margin-top:12px; font-size:12px; color:#475569;}
@@ -4558,22 +4645,35 @@ DASH_GAME_TEMPLATE = """<!doctype html>
     {% else %}
       <div class="grid">
         <div class="card">
-          <div class="arena" id="arena">
-            <div class="dummy" id="dummy">
+          <div class="arena" id="arena" title="點這裡也能攻擊">
+            <div class="hitflash" id="hitFlash"></div>
+            <div class="vignette"></div>
+            <div class="dummy stage0" id="dummy">
               <div class="head">
-                <div class="eye l"></div><div class="eye r"></div><div class="mouth"></div>
+                <div class="eye l"></div>
+                <div class="eye r"></div>
+                <div class="mouth"></div>
+                <div class="wound bruise b1"></div>
+                <div class="wound bruise b2"></div>
+                <div class="wound bump"></div>
+                <div class="wound bandage"></div>
+                <div class="wound sweat"></div>
               </div>
               <div class="body"></div>
               <div class="name" id="dummyName">{{ other_name }}</div>
+              <div class="state-label" id="stateLabel">狀態：笑嘻嘻</div>
             </div>
             <div class="fx" id="fx">BAM!</div>
           </div>
           <div class="hp-wrap">
-            <div class="muted" style="font-size:13px;">HP: <span id="hpText">100 / 100</span></div>
+            <div class="hp-row">
+              <div class="muted" style="font-size:13px;">HP: <span id="hpText">100 / 100</span></div>
+              <div class="muted" style="font-size:13px;">回合 <span id="roundText">1</span></div>
+            </div>
             <div class="hp-bg"><div class="hp-bar" id="hpBar"></div></div>
           </div>
           <div class="ctl">
-            <button class="btn btn-hit" id="hitBtn">攻擊！</button>
+            <button class="btn btn-hit" id="hitBtn">重擊！</button>
             <button class="btn btn-soft" id="healBtn">喝奶茶冷靜一下</button>
             <button class="btn btn-reset" id="resetBtn">重開一局</button>
           </div>
@@ -4589,7 +4689,7 @@ DASH_GAME_TEMPLATE = """<!doctype html>
           </div>
           <div class="note">
             說明：純虛擬紓壓遊戲，不鼓勵現實暴力。<br/>
-            打到 0 HP 會自動復活進下一回合（更耐打）。
+            你現在看到的是「受傷分段」版本：黑眼圈、腫包、OK 繃都會隨血量出現。
           </div>
         </div>
       </div>
@@ -4599,17 +4699,19 @@ DASH_GAME_TEMPLATE = """<!doctype html>
   {% if allow_play %}
   <script>
     (() => {
-      const STORAGE_KEY = "dash_stress_game_v1";
+      const STORAGE_KEY = "dash_stress_game_v2";
       const tools = [
-        { id: "pillow", name: "軟枕頭", min: 4, max: 9, fx: "啪！" },
-        { id: "slipper", name: "拖鞋", min: 8, max: 14, fx: "咻啪！" },
-        { id: "bubble_hammer", name: "泡泡槌", min: 10, max: 18, fx: "BAM!" },
-        { id: "mega_keyboard", name: "巨型鍵盤", min: 14, max: 24, fx: "K.O?" },
-        { id: "laser_cat", name: "雷射貓掌", min: 18, max: 30, fx: "喵砰！" }
+        { id: "pillow", name: "軟枕頭", min: 6, max: 12, fx: "啪！", shake: 1 },
+        { id: "slipper", name: "拖鞋", min: 10, max: 18, fx: "咻啪！", shake: 1.25 },
+        { id: "bubble_hammer", name: "泡泡槌", min: 14, max: 24, fx: "BAM!", shake: 1.45 },
+        { id: "mega_keyboard", name: "巨型鍵盤", min: 18, max: 30, fx: "轟！", shake: 1.7 },
+        { id: "laser_cat", name: "雷射貓掌", min: 22, max: 36, fx: "喵砰！", shake: 2.0 }
       ];
+      const stageNames = ["笑嘻嘻", "冒冷汗", "黑眼圈", "鼻青臉腫", "懷疑人生"];
 
       const hpBar = document.getElementById("hpBar");
       const hpText = document.getElementById("hpText");
+      const roundText = document.getElementById("roundText");
       const totalDmgEl = document.getElementById("totalDmg");
       const comboEl = document.getElementById("combo");
       const koCountEl = document.getElementById("koCount");
@@ -4617,8 +4719,10 @@ DASH_GAME_TEMPLATE = """<!doctype html>
       const healBtn = document.getElementById("healBtn");
       const resetBtn = document.getElementById("resetBtn");
       const arena = document.getElementById("arena");
+      const hitFlash = document.getElementById("hitFlash");
       const dummy = document.getElementById("dummy");
       const fx = document.getElementById("fx");
+      const stateLabel = document.getElementById("stateLabel");
       const toolsWrap = document.getElementById("tools");
 
       let state = {
@@ -4634,6 +4738,15 @@ DASH_GAME_TEMPLATE = """<!doctype html>
 
       function pickTool() { return tools.find(t => t.id === state.selectedTool) || tools[0]; }
       function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+      function hpRatio() { return state.hpMax <= 0 ? 0 : state.hp / state.hpMax; }
+
+      function stageFromRatio(r) {
+        if (r > 0.75) return 0;
+        if (r > 0.55) return 1;
+        if (r > 0.35) return 2;
+        if (r > 0.15) return 3;
+        return 4;
+      }
 
       function renderTools() {
         toolsWrap.innerHTML = "";
@@ -4647,72 +4760,105 @@ DASH_GAME_TEMPLATE = """<!doctype html>
       }
 
       function render() {
+        const ratio = hpRatio();
+        const stage = stageFromRatio(ratio);
         hpText.textContent = state.hp + " / " + state.hpMax;
-        hpBar.style.width = Math.max(0, (state.hp / state.hpMax) * 100) + "%";
+        roundText.textContent = state.round;
+        hpBar.style.width = Math.max(0, ratio * 100) + "%";
         totalDmgEl.textContent = state.totalDamage;
         comboEl.textContent = "x" + state.combo;
         koCountEl.textContent = state.koCount;
+        stateLabel.textContent = "狀態：" + stageNames[stage];
+        dummy.className = "dummy stage" + stage + (dummy.classList.contains("downed") ? " downed" : "");
+
+        if (ratio > 0.6) hpBar.style.background = "linear-gradient(90deg, #22c55e, #86efac)";
+        else if (ratio > 0.3) hpBar.style.background = "linear-gradient(90deg, #f59e0b, #fcd34d)";
+        else hpBar.style.background = "linear-gradient(90deg, #ef4444, #fb7185)";
       }
 
-      function showFx(text) {
+      function flash(strength) {
+        hitFlash.style.opacity = String(Math.min(0.52, 0.14 + strength * 0.09));
+        setTimeout(() => { hitFlash.style.opacity = "0"; }, 80);
+      }
+
+      function showFx(text, strong) {
         fx.textContent = text;
         fx.style.opacity = "1";
-        setTimeout(() => { fx.style.opacity = "0"; }, 180);
+        fx.style.transform = "translate(-50%,-50%) scale(" + (strong ? "1.15" : "1") + ")";
+        setTimeout(() => {
+          fx.style.opacity = "0";
+          fx.style.transform = "translate(-50%,-50%) scale(1)";
+        }, 190);
       }
 
-      function floatDamage(dmg) {
+      function floatDamage(dmg, crit) {
         const span = document.createElement("div");
         span.className = "float";
-        span.textContent = "-" + dmg;
-        span.style.left = (40 + Math.random() * 20) + "%";
-        span.style.top = (28 + Math.random() * 24) + "%";
+        span.textContent = (crit ? "爆擊 -" : "-") + dmg;
+        span.style.left = (38 + Math.random() * 24) + "%";
+        span.style.top = (28 + Math.random() * 22) + "%";
+        span.style.color = crit ? "#b91c1c" : "#be123c";
+        span.style.fontSize = (crit ? 28 : 22) + "px";
         arena.appendChild(span);
-        setTimeout(() => span.remove(), 700);
+        setTimeout(() => span.remove(), 760);
       }
 
-      function shake() {
+      function shake(power) {
+        const px = Math.round(8 * power);
         dummy.animate([
-          { transform: "translate(-50%,-50%) translateX(0)" },
-          { transform: "translate(-50%,-50%) translateX(-8px)" },
-          { transform: "translate(-50%,-50%) translateX(8px)" },
-          { transform: "translate(-50%,-50%) translateX(0)" }
-        ], { duration: 120, iterations: 1 });
+          { transform: "translate(-50%,-50%) translateX(0) rotate(0deg)" },
+          { transform: "translate(-50%,-50%) translateX(" + (-px) + "px) rotate(-4deg)" },
+          { transform: "translate(-50%,-50%) translateX(" + (px) + "px) rotate(4deg)" },
+          { transform: "translate(-50%,-50%) translateX(" + (-px * 0.4) + "px) rotate(-2deg)" },
+          { transform: "translate(-50%,-50%) translateX(0) rotate(0deg)" }
+        ], { duration: Math.round(130 + power * 40), iterations: 1 });
       }
 
       function ko() {
         state.koCount += 1;
-        state.round += 1;
-        state.hpMax = 100 + (state.round - 1) * 15;
-        state.hp = state.hpMax;
-        showFx("K.O!");
-        save();
+        showFx("K.O!", true);
+        dummy.classList.add("downed");
+        setTimeout(() => {
+          state.round += 1;
+          state.hpMax = 100 + (state.round - 1) * 18;
+          state.hp = state.hpMax;
+          state.combo = 1;
+          dummy.classList.remove("downed");
+          render();
+          save();
+        }, 360);
       }
 
       function hit() {
         const now = Date.now();
-        if (now - state.lastHitTs <= 1200) state.combo = Math.min(12, state.combo + 1);
+        if (now - state.lastHitTs <= 1300) state.combo = Math.min(15, state.combo + 1);
         else state.combo = 1;
         state.lastHitTs = now;
 
         const tool = pickTool();
+        const crit = Math.random() < 0.2;
         const base = randInt(tool.min, tool.max);
-        const dmg = Math.max(1, Math.floor(base * (1 + (state.combo - 1) * 0.07)));
+        const comboMul = 1 + (state.combo - 1) * 0.09;
+        const critMul = crit ? 1.6 : 1.0;
+        const dmg = Math.max(1, Math.floor(base * comboMul * critMul));
 
         state.hp = Math.max(0, state.hp - dmg);
         state.totalDamage += dmg;
-        showFx(tool.fx);
-        floatDamage(dmg);
-        shake();
-        if (state.hp <= 0) ko();
+        showFx(crit ? "爆擊!" : tool.fx, crit);
+        floatDamage(dmg, crit);
+        flash(tool.shake + (crit ? 0.4 : 0));
+        shake(tool.shake + (crit ? 0.4 : 0));
         render();
         save();
+
+        if (state.hp <= 0) ko();
       }
 
       function heal() {
         state.combo = 1;
-        const healPts = 8;
+        const healPts = 10;
         state.hp = Math.min(state.hpMax, state.hp + healPts);
-        showFx("呼...");
+        showFx("呼...", false);
         render();
         save();
       }
@@ -4741,6 +4887,9 @@ DASH_GAME_TEMPLATE = """<!doctype html>
       hitBtn.addEventListener("click", hit);
       healBtn.addEventListener("click", heal);
       resetBtn.addEventListener("click", reset);
+      arena.addEventListener("click", (e) => {
+        if (e.target && e.target.id !== "healBtn" && e.target.id !== "resetBtn") hit();
+      });
       document.addEventListener("keydown", (e) => {
         if (e.code === "Space") { e.preventDefault(); hit(); }
       });
