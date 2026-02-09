@@ -3240,7 +3240,7 @@ DASH_TEMPLATE = """<!doctype html>
     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
       <div>
         <h1 class="text-2xl md:text-3xl font-bold">{{ bot_name }}｜私人儀表板</h1>
-        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a>　·　<a class="underline" href="/dash/settings">設定中心</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a>　·　<a class="underline" href="/dash/repair">修復中心</a></div>
+        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a>　·　<a class="underline" href="/dash/settings">設定中心</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a>　·　<a class="underline" href="/dash/repair">修復中心</a>　·　<a class="underline" href="/dash/game">紓壓遊戲</a></div>
       </div>
       <div class="text-sm text-slate-600">
         <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
@@ -3558,6 +3558,7 @@ DASH_TASKS_TEMPLATE = """<!doctype html>
           · <a class="underline" href="/dash/settings">設定中心</a>
           · <a class="underline" href="/dash/gallery">相簿</a>
           · <a class="underline" href="/dash/repair">修復中心</a>
+          · <a class="underline" href="/dash/game">紓壓遊戲</a>
         </div>
       </div>
       <div class="text-sm text-slate-600">
@@ -3827,6 +3828,7 @@ DASH_GALLERY_TEMPLATE = """<!doctype html>
           · <a class="underline" href="/dash/settings">設定中心</a>
           · <a class="underline" href="/dash/tasks">任務牆</a>
           · <a class="underline" href="/dash/repair">修復中心</a>
+          · <a class="underline" href="/dash/game">紓壓遊戲</a>
         </div>
       </div>
       <div class="text-sm text-slate-600">
@@ -4089,7 +4091,7 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
     <div class="flex items-center justify-between">
       <div>
         <div class="text-2xl font-bold">{{ bot_name }} · 設定中心</div>
-        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="/dash">回儀表板</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a>　·　<a class="underline" href="/dash/repair">修復中心</a></div>
+        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="/dash">回儀表板</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a>　·　<a class="underline" href="/dash/repair">修復中心</a>　·　<a class="underline" href="/dash/game">紓壓遊戲</a></div>
       </div>
       <div class="text-sm text-slate-600">
         <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
@@ -4312,7 +4314,7 @@ DASH_REPAIR_TEMPLATE = """<!doctype html>
     <div class="row" style="justify-content:space-between;">
       <div>
         <div style="font-size:28px; font-weight:800;">修復中心</div>
-        <div class="muted">更新時間：{{ updated_at }}　·　<a href="/dash">回儀表板</a>　·　<a href="/dash/settings">設定中心</a>　·　<a href="/dash/tasks">任務牆</a>　·　<a href="/dash/gallery">相簿</a></div>
+        <div class="muted">更新時間：{{ updated_at }}　·　<a href="/dash">回儀表板</a>　·　<a href="/dash/settings">設定中心</a>　·　<a href="/dash/tasks">任務牆</a>　·　<a href="/dash/gallery">相簿</a>　·　<a href="/dash/game">紓壓遊戲</a></div>
       </div>
       <div class="muted">{{ me_name }}（你） · {{ other_name }}（對方）</div>
     </div>
@@ -4484,6 +4486,271 @@ DASH_REPAIR_TEMPLATE = """<!doctype html>
       </div>
     </div>
   </div>
+</body>
+</html>
+"""
+
+DASH_GAME_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }} · 紓壓遊戲</title>
+  <style>
+    :root{
+      --bg:#f8fafc; --card:#ffffff; --line:#dbe3ef; --text:#0f172a; --muted:#475569;
+      --pink:#ff6fae; --blue:#2f6bff; --mint:#23b19d; --orange:#ff8a4c;
+    }
+    body{margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans TC","Helvetica Neue",Arial;}
+    .wrap{max-width:1080px; margin:0 auto; padding:20px 16px 32px;}
+    .top{display:flex; flex-wrap:wrap; gap:12px; justify-content:space-between; align-items:flex-end;}
+    .muted{color:var(--muted);}
+    .card{background:var(--card); border:1px solid var(--line); border-radius:20px; padding:16px; box-shadow:0 8px 24px rgba(15,23,42,.06);}
+    .grid{display:grid; grid-template-columns:1fr; gap:16px; margin-top:16px;}
+    @media (min-width: 920px){ .grid{grid-template-columns:1.2fr 1fr;} }
+    .arena{position:relative; min-height:420px; overflow:hidden; background:
+      radial-gradient(circle at 20% 15%, #ffe0f0 0, #ffe0f0 12%, transparent 13%),
+      radial-gradient(circle at 78% 20%, #d7e7ff 0, #d7e7ff 14%, transparent 15%),
+      linear-gradient(180deg, #fff7fc 0%, #f7fbff 55%, #ecf4ff 100%);
+      border-radius:18px; border:1px solid #e5e7eb;
+    }
+    .dummy{position:absolute; left:50%; top:54%; transform:translate(-50%,-50%); width:180px; text-align:center; user-select:none;}
+    .head{width:92px; height:92px; background:#ffd7bf; border:3px solid #334155; border-radius:50%; margin:0 auto; position:relative;}
+    .eye{position:absolute; top:34px; width:12px; height:12px; border-radius:50%; background:#111827;}
+    .eye.l{left:24px;} .eye.r{right:24px;}
+    .mouth{position:absolute; left:50%; top:56px; width:32px; height:14px; border-bottom:4px solid #111827; border-radius:0 0 30px 30px; transform:translateX(-50%);}
+    .body{width:128px; height:152px; background:#76a9ff; border:3px solid #334155; border-radius:22px; margin:8px auto 0;}
+    .name{margin-top:8px; font-weight:800;}
+    .hp-wrap{margin:10px auto 0; max-width:360px;}
+    .hp-bg{height:16px; border-radius:999px; background:#e2e8f0; overflow:hidden;}
+    .hp-bar{height:100%; width:100%; background:linear-gradient(90deg, #ff5f8f, #ff8a4c); transition:width .12s linear;}
+    .tools{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px;}
+    .tool{border:1px solid #cbd5e1; background:#fff; padding:10px; border-radius:12px; cursor:pointer; text-align:left;}
+    .tool.active{border-color:var(--blue); box-shadow:inset 0 0 0 1px var(--blue); background:#eff6ff;}
+    .ctl{display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;}
+    .btn{border:0; border-radius:12px; padding:10px 14px; font-weight:800; cursor:pointer;}
+    .btn-hit{background:var(--pink); color:#fff;}
+    .btn-reset{background:#111827; color:#fff;}
+    .btn-soft{background:#e2e8f0; color:#1f2937;}
+    .fx{position:absolute; left:50%; top:36%; transform:translate(-50%,-50%); font-size:40px; font-weight:900; color:#be123c; opacity:0; pointer-events:none; text-shadow:0 8px 16px rgba(0,0,0,.12);}
+    .float{position:absolute; font-weight:900; color:#be123c; pointer-events:none; animation:rise .65s ease-out forwards;}
+    @keyframes rise { from{transform:translateY(0); opacity:1;} to{transform:translateY(-48px); opacity:0;} }
+    .stats{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px;}
+    .stat{background:#f8fafc; border:1px solid #dbe3ef; border-radius:12px; padding:8px;}
+    .note{margin-top:12px; font-size:12px; color:#475569;}
+    .gate{padding:22px; background:#fff7ed; border:1px solid #fed7aa; color:#7c2d12; border-radius:16px;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <div style="font-size:30px; font-weight:900;">紓壓遊戲：打爆臭晡晡（虛擬）</div>
+        <div class="muted">更新時間：{{ updated_at }}　·　<a href="/dash">回儀表板</a>　·　<a href="/dash/repair">修復中心</a>　·　<a href="/dash/tasks">任務牆</a></div>
+      </div>
+      <div class="muted">{{ me_name }}（你） · {{ other_name }}（對手）</div>
+    </div>
+
+    {% if not allow_play %}
+      <div class="gate" style="margin-top:16px;">
+        目前無法確認你的 couple 身分，暫時不能進入遊戲。你可以先回儀表板看其他功能。
+      </div>
+    {% else %}
+      <div class="grid">
+        <div class="card">
+          <div class="arena" id="arena">
+            <div class="dummy" id="dummy">
+              <div class="head">
+                <div class="eye l"></div><div class="eye r"></div><div class="mouth"></div>
+              </div>
+              <div class="body"></div>
+              <div class="name" id="dummyName">{{ other_name }}</div>
+            </div>
+            <div class="fx" id="fx">BAM!</div>
+          </div>
+          <div class="hp-wrap">
+            <div class="muted" style="font-size:13px;">HP: <span id="hpText">100 / 100</span></div>
+            <div class="hp-bg"><div class="hp-bar" id="hpBar"></div></div>
+          </div>
+          <div class="ctl">
+            <button class="btn btn-hit" id="hitBtn">攻擊！</button>
+            <button class="btn btn-soft" id="healBtn">喝奶茶冷靜一下</button>
+            <button class="btn btn-reset" id="resetBtn">重開一局</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div style="font-size:22px; font-weight:900;">工具箱</div>
+          <div class="tools" id="tools"></div>
+          <div class="stats">
+            <div class="stat"><div class="muted" style="font-size:12px;">總傷害</div><div id="totalDmg" style="font-size:26px; font-weight:900;">0</div></div>
+            <div class="stat"><div class="muted" style="font-size:12px;">連擊</div><div id="combo" style="font-size:26px; font-weight:900;">x1</div></div>
+            <div class="stat"><div class="muted" style="font-size:12px;">KO 次數</div><div id="koCount" style="font-size:26px; font-weight:900;">0</div></div>
+          </div>
+          <div class="note">
+            說明：純虛擬紓壓遊戲，不鼓勵現實暴力。<br/>
+            打到 0 HP 會自動復活進下一回合（更耐打）。
+          </div>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+
+  {% if allow_play %}
+  <script>
+    (() => {
+      const STORAGE_KEY = "dash_stress_game_v1";
+      const tools = [
+        { id: "pillow", name: "軟枕頭", min: 4, max: 9, fx: "啪！" },
+        { id: "slipper", name: "拖鞋", min: 8, max: 14, fx: "咻啪！" },
+        { id: "bubble_hammer", name: "泡泡槌", min: 10, max: 18, fx: "BAM!" },
+        { id: "mega_keyboard", name: "巨型鍵盤", min: 14, max: 24, fx: "K.O?" },
+        { id: "laser_cat", name: "雷射貓掌", min: 18, max: 30, fx: "喵砰！" }
+      ];
+
+      const hpBar = document.getElementById("hpBar");
+      const hpText = document.getElementById("hpText");
+      const totalDmgEl = document.getElementById("totalDmg");
+      const comboEl = document.getElementById("combo");
+      const koCountEl = document.getElementById("koCount");
+      const hitBtn = document.getElementById("hitBtn");
+      const healBtn = document.getElementById("healBtn");
+      const resetBtn = document.getElementById("resetBtn");
+      const arena = document.getElementById("arena");
+      const dummy = document.getElementById("dummy");
+      const fx = document.getElementById("fx");
+      const toolsWrap = document.getElementById("tools");
+
+      let state = {
+        round: 1,
+        hpMax: 100,
+        hp: 100,
+        totalDamage: 0,
+        combo: 1,
+        koCount: 0,
+        selectedTool: "pillow",
+        lastHitTs: 0
+      };
+
+      function pickTool() { return tools.find(t => t.id === state.selectedTool) || tools[0]; }
+      function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+      function renderTools() {
+        toolsWrap.innerHTML = "";
+        for (const t of tools) {
+          const btn = document.createElement("button");
+          btn.className = "tool" + (t.id === state.selectedTool ? " active" : "");
+          btn.innerHTML = "<strong>" + t.name + "</strong><div class='muted' style='font-size:12px;'>傷害 " + t.min + " ~ " + t.max + "</div>";
+          btn.onclick = () => { state.selectedTool = t.id; renderTools(); save(); };
+          toolsWrap.appendChild(btn);
+        }
+      }
+
+      function render() {
+        hpText.textContent = state.hp + " / " + state.hpMax;
+        hpBar.style.width = Math.max(0, (state.hp / state.hpMax) * 100) + "%";
+        totalDmgEl.textContent = state.totalDamage;
+        comboEl.textContent = "x" + state.combo;
+        koCountEl.textContent = state.koCount;
+      }
+
+      function showFx(text) {
+        fx.textContent = text;
+        fx.style.opacity = "1";
+        setTimeout(() => { fx.style.opacity = "0"; }, 180);
+      }
+
+      function floatDamage(dmg) {
+        const span = document.createElement("div");
+        span.className = "float";
+        span.textContent = "-" + dmg;
+        span.style.left = (40 + Math.random() * 20) + "%";
+        span.style.top = (28 + Math.random() * 24) + "%";
+        arena.appendChild(span);
+        setTimeout(() => span.remove(), 700);
+      }
+
+      function shake() {
+        dummy.animate([
+          { transform: "translate(-50%,-50%) translateX(0)" },
+          { transform: "translate(-50%,-50%) translateX(-8px)" },
+          { transform: "translate(-50%,-50%) translateX(8px)" },
+          { transform: "translate(-50%,-50%) translateX(0)" }
+        ], { duration: 120, iterations: 1 });
+      }
+
+      function ko() {
+        state.koCount += 1;
+        state.round += 1;
+        state.hpMax = 100 + (state.round - 1) * 15;
+        state.hp = state.hpMax;
+        showFx("K.O!");
+        save();
+      }
+
+      function hit() {
+        const now = Date.now();
+        if (now - state.lastHitTs <= 1200) state.combo = Math.min(12, state.combo + 1);
+        else state.combo = 1;
+        state.lastHitTs = now;
+
+        const tool = pickTool();
+        const base = randInt(tool.min, tool.max);
+        const dmg = Math.max(1, Math.floor(base * (1 + (state.combo - 1) * 0.07)));
+
+        state.hp = Math.max(0, state.hp - dmg);
+        state.totalDamage += dmg;
+        showFx(tool.fx);
+        floatDamage(dmg);
+        shake();
+        if (state.hp <= 0) ko();
+        render();
+        save();
+      }
+
+      function heal() {
+        state.combo = 1;
+        const healPts = 8;
+        state.hp = Math.min(state.hpMax, state.hp + healPts);
+        showFx("呼...");
+        render();
+        save();
+      }
+
+      function reset() {
+        state = { round: 1, hpMax: 100, hp: 100, totalDamage: 0, combo: 1, koCount: 0, selectedTool: "pillow", lastHitTs: 0 };
+        renderTools();
+        render();
+        save();
+      }
+
+      function save() {
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (_) {}
+      }
+
+      function load() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (!raw) return;
+          const x = JSON.parse(raw);
+          state = Object.assign(state, x || {});
+          if (!tools.some(t => t.id === state.selectedTool)) state.selectedTool = "pillow";
+        } catch (_) {}
+      }
+
+      hitBtn.addEventListener("click", hit);
+      healBtn.addEventListener("click", heal);
+      resetBtn.addEventListener("click", reset);
+      document.addEventListener("keydown", (e) => {
+        if (e.code === "Space") { e.preventDefault(); hit(); }
+      });
+
+      load();
+      renderTools();
+      render();
+    })();
+  </script>
+  {% endif %}
 </body>
 </html>
 """
@@ -5269,6 +5536,28 @@ def dash_repair():
         trigger_top=trigger_top,
         streak_days=streak_days,
         streak_badge=_repair_badge(streak_days),
+    )
+
+
+@app.route("/dash/game")
+def dash_game():
+    resp = _dash_require_page()
+    if resp is not None:
+        return resp
+
+    base = _build_dash_base()
+    uid = _dash_current_uid()
+    _, me_name, _, other_name = _dash_pair_for_uid(base, uid)
+    gf_id = (base.get("gf_id") or "").strip()
+    bf_id = (base.get("bf_id") or "").strip()
+    allow_play = bool(uid and (uid == gf_id or uid == bf_id))
+
+    return render_template_string(
+        DASH_GAME_TEMPLATE,
+        **base,
+        me_name=me_name,
+        other_name=other_name,
+        allow_play=allow_play,
     )
 
 
