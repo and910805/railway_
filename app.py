@@ -4390,6 +4390,13 @@ DASH_REPAIR_TEMPLATE = """<!doctype html>
         </div>
 
         <div style="margin-top:14px;">
+          <label style="display:inline-flex; align-items:center; gap:8px; margin-bottom:10px;">
+            <input type="checkbox" name="notify_other" value="1" checked />
+            <span>送出後通知對方</span>
+          </label>
+        </div>
+
+        <div style="margin-top:4px;">
           <button class="btn" type="submit">送出（先抒發）</button>
         </div>
       </form>
@@ -5090,6 +5097,7 @@ def dash_repair():
                     intensity = 3
                 intensity = max(1, min(5, intensity))
                 wants_reply_now = (request.form.get("wants_reply_now") or "1").strip() == "1"
+                notify_other = bool(request.form.get("notify_other"))
 
                 if not vent_text:
                     raise ValueError("請先填寫『今天不爽什麼』")
@@ -5117,46 +5125,47 @@ def dash_repair():
                 status = f"已建立修復事件 #{event_id}。"
 
                 # Notify counterpart (best-effort; do not fail form submission on push errors)
-                try:
-                    other_role = None
-                    if other_id and other_id == (base.get("gf_id") or ""):
-                        other_role = "girlfriend"
-                    elif other_id and other_id == (base.get("bf_id") or ""):
-                        other_role = "boyfriend"
+                if notify_other:
+                    try:
+                        other_role = None
+                        if other_id and other_id == (base.get("gf_id") or ""):
+                            other_role = "girlfriend"
+                        elif other_id and other_id == (base.get("bf_id") or ""):
+                            other_role = "boyfriend"
 
-                    notify_ids: list[str] = []
-                    if other_role:
-                        notify_ids = [
-                            x for x in _get_role_ids(other_role)
-                            if (x or "").strip() and (x or "").strip() != (me_id or "")
-                        ]
-                    elif other_id and other_id != me_id:
-                        notify_ids = [other_id]
+                        notify_ids: list[str] = []
+                        if other_role:
+                            notify_ids = [
+                                x for x in _get_role_ids(other_role)
+                                if (x or "").strip() and (x or "").strip() != (me_id or "")
+                            ]
+                        elif other_id and other_id != me_id:
+                            notify_ids = [other_id]
 
-                    if notify_ids:
-                        cool_hint = "強度較高，請先安撫，暫時不要解釋。" if intensity >= 4 else "可直接到修復中心查看任務卡。"
-                        summary = (vent_text[:100] + "…") if len(vent_text) > 100 else vent_text
-                        notify_text = (
-                            "📩 修復中心有新事件\n"
-                            f"來自：{me_name}\n"
-                            f"情緒：{_repair_emotion_label(emotion_type)}（{intensity}/5）\n"
-                            f"需求：{_repair_need_label(need_type)}\n"
-                            f"摘要：{summary}\n"
-                            f"{cool_hint}\n"
-                            "請到「儀表板 > 修復中心」查看。"
-                        )
-                        for to_uid in sorted(set(notify_ids)):
-                            try:
-                                push_and_log(
-                                    to_uid,
-                                    notify_text,
-                                    reason="REPAIR_NEW_EVENT",
-                                    target_role=other_role,
-                                )
-                            except Exception as pe:
-                                logger.error("[REPAIR_NOTIFY][FAILED] to=%s err=%s", to_uid, str(pe))
-                except Exception as ne:
-                    logger.error("[REPAIR_NOTIFY][EXCEPTION] err=%s", str(ne))
+                        if notify_ids:
+                            cool_hint = "強度較高，請先安撫，暫時不要解釋。" if intensity >= 4 else "可直接到修復中心查看任務卡。"
+                            summary = (vent_text[:100] + "…") if len(vent_text) > 100 else vent_text
+                            notify_text = (
+                                "📩 修復中心有新事件\n"
+                                f"來自：{me_name}\n"
+                                f"情緒：{_repair_emotion_label(emotion_type)}（{intensity}/5）\n"
+                                f"需求：{_repair_need_label(need_type)}\n"
+                                f"摘要：{summary}\n"
+                                f"{cool_hint}\n"
+                                "請到「儀表板 > 修復中心」查看。"
+                            )
+                            for to_uid in sorted(set(notify_ids)):
+                                try:
+                                    push_and_log(
+                                        to_uid,
+                                        notify_text,
+                                        reason="REPAIR_NEW_EVENT",
+                                        target_role=other_role,
+                                    )
+                                except Exception as pe:
+                                    logger.error("[REPAIR_NOTIFY][FAILED] to=%s err=%s", to_uid, str(pe))
+                    except Exception as ne:
+                        logger.error("[REPAIR_NOTIFY][EXCEPTION] err=%s", str(ne))
 
             elif action == "save_triggers":
                 event_id = int(request.form.get("event_id") or 0)
