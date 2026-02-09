@@ -66,6 +66,17 @@ from db_love import (
     mark_message_processed,
     create_dashboard_magic_token,
     consume_dashboard_magic_token,
+    # conflict repair workflow
+    create_conflict_event,
+    get_conflict_event,
+    list_conflict_events,
+    list_open_conflict_events,
+    list_conflict_triggers_for_event,
+    set_conflict_event_triggers,
+    list_conflict_confirmed_users,
+    confirm_conflict_event,
+    list_conflict_trigger_top,
+    get_no_blowup_streak_days,
 )
 
 
@@ -3229,7 +3240,7 @@ DASH_TEMPLATE = """<!doctype html>
     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
       <div>
         <h1 class="text-2xl md:text-3xl font-bold">{{ bot_name }}｜私人儀表板</h1>
-        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a>　·　<a class="underline" href="/dash/settings">設定中心</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a></div>
+        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a>　·　<a class="underline" href="/dash/settings">設定中心</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a>　·　<a class="underline" href="/dash/repair">修復中心</a></div>
       </div>
       <div class="text-sm text-slate-600">
         <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
@@ -3546,6 +3557,7 @@ DASH_TASKS_TEMPLATE = """<!doctype html>
           · <a class="underline" href="/dash">回儀表板</a>
           · <a class="underline" href="/dash/settings">設定中心</a>
           · <a class="underline" href="/dash/gallery">相簿</a>
+          · <a class="underline" href="/dash/repair">修復中心</a>
         </div>
       </div>
       <div class="text-sm text-slate-600">
@@ -3814,6 +3826,7 @@ DASH_GALLERY_TEMPLATE = """<!doctype html>
           · <a class="underline" href="/dash">回儀表板</a>
           · <a class="underline" href="/dash/settings">設定中心</a>
           · <a class="underline" href="/dash/tasks">任務牆</a>
+          · <a class="underline" href="/dash/repair">修復中心</a>
         </div>
       </div>
       <div class="text-sm text-slate-600">
@@ -4076,7 +4089,7 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
     <div class="flex items-center justify-between">
       <div>
         <div class="text-2xl font-bold">{{ bot_name }} · 設定中心</div>
-        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="/dash">回儀表板</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a></div>
+        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="/dash">回儀表板</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a>　·　<a class="underline" href="/dash/repair">修復中心</a></div>
       </div>
       <div class="text-sm text-slate-600">
         <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
@@ -4233,6 +4246,241 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
 
 
 
+DASH_REPAIR_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }} · 修復中心</title>
+  <style>
+    :root{
+      --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-300:#cbd5e1;
+      --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155; --slate-800:#1f2937; --slate-900:#0f172a;
+      --emerald-50:#ecfdf5; --emerald-200:#a7f3d0; --emerald-700:#047857; --emerald-900:#064e3b;
+      --amber-50:#fffbeb; --amber-200:#fde68a; --amber-700:#b45309; --amber-800:#92400e; --amber-900:#78350f;
+      --rose-50:#fff1f2; --rose-200:#fecdd3; --rose-900:#881337;
+      --shadow-sm: 0 6px 18px rgba(15, 23, 42, .06);
+    }
+    body{
+      margin:0;
+      background:var(--slate-50);
+      color:var(--slate-900);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", "Helvetica Neue", Arial;
+    }
+    .wrap{max-width:1080px; margin:0 auto; padding:24px 16px 40px;}
+    .grid{display:grid; gap:16px;}
+    .grid-2{grid-template-columns:1fr;}
+    @media (min-width: 900px){ .grid-2{grid-template-columns:1fr 1fr;} }
+    .card{background:#fff; border:1px solid var(--slate-200); border-radius:18px; padding:18px; box-shadow:var(--shadow-sm);}
+    .muted{color:var(--slate-600);}
+    .tiny{font-size:12px; color:var(--slate-500);}
+    .row{display:flex; flex-wrap:wrap; gap:10px; align-items:center;}
+    .pill{display:inline-flex; align-items:center; border-radius:999px; padding:4px 10px; font-size:12px;}
+    .pill-open{background:var(--amber-50); color:var(--amber-800);}
+    .pill-closed{background:var(--emerald-50); color:var(--emerald-700);}
+    .pill-cool{background:var(--rose-50); color:var(--rose-900);}
+    .input, textarea, select{
+      width:100%;
+      border:1px solid var(--slate-300);
+      border-radius:12px;
+      padding:10px 12px;
+      box-sizing:border-box;
+      font:inherit;
+      background:#fff;
+    }
+    textarea{min-height:110px; resize:vertical;}
+    .btn{
+      border:0; border-radius:12px; padding:10px 14px; cursor:pointer;
+      font-weight:700; background:#111827; color:#fff;
+    }
+    .btn-light{
+      border:1px solid var(--slate-300); background:#fff; color:var(--slate-800);
+    }
+    .line{height:1px; background:var(--slate-200); margin:14px 0;}
+    .event{border:1px solid var(--slate-200); border-radius:14px; padding:14px;}
+    .event + .event{margin-top:12px;}
+    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+    .warn{border:1px solid var(--rose-200); background:var(--rose-50); color:var(--rose-900); padding:10px 12px; border-radius:12px;}
+    .ok{border:1px solid var(--emerald-200); background:var(--emerald-50); color:var(--emerald-900); padding:10px 12px; border-radius:12px;}
+    .list{margin:8px 0 0 20px; padding:0;}
+    .check-grid{display:grid; grid-template-columns:1fr; gap:8px; margin-top:8px;}
+    @media (min-width: 600px){ .check-grid{grid-template-columns:1fr 1fr;} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="row" style="justify-content:space-between;">
+      <div>
+        <div style="font-size:28px; font-weight:800;">修復中心</div>
+        <div class="muted">更新時間：{{ updated_at }}　·　<a href="/dash">回儀表板</a>　·　<a href="/dash/settings">設定中心</a>　·　<a href="/dash/tasks">任務牆</a>　·　<a href="/dash/gallery">相簿</a></div>
+      </div>
+      <div class="muted">{{ me_name }}（你） · {{ other_name }}（對方）</div>
+    </div>
+
+    {% if status %}
+      <div class="ok" style="margin-top:16px;">{{ status }}</div>
+    {% endif %}
+    {% if error %}
+      <div class="warn" style="margin-top:16px;">{{ error }}</div>
+    {% endif %}
+
+    <div class="grid grid-2" style="margin-top:16px;">
+      <div class="card">
+        <div class="muted">連續不吵爆天數</div>
+        <div style="font-size:36px; font-weight:800; margin-top:6px;">{{ streak_days }}</div>
+        <div class="tiny">徽章：{{ streak_badge }}</div>
+      </div>
+      <div class="card">
+        <div style="font-weight:700;">本週 Top 雷點</div>
+        {% if trigger_top %}
+          <ul class="list">
+            {% for t in trigger_top %}
+              <li>{{ t.label }}（{{ t.count }} 次）</li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <div class="tiny" style="margin-top:8px;">本週尚無資料</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div style="font-size:20px; font-weight:800;">1) 情緒投遞箱</div>
+      <div class="tiny">先抒發，再修復。系統會把內容整理成可執行任務。</div>
+      <form method="post" style="margin-top:12px;">
+        <input type="hidden" name="action" value="create" />
+
+        <label>今天不爽什麼</label>
+        <textarea name="vent_text" required placeholder="例如：你剛剛回我很快，但語氣讓我覺得被敷衍。"></textarea>
+
+        <div class="grid grid-2" style="margin-top:10px;">
+          <div>
+            <label>情緒類型</label>
+            <select name="emotion_type">
+              {% for key, label in emotion_options %}
+                <option value="{{ key }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label>強度（1~5）</label>
+            <select name="intensity">
+              {% for n in [1,2,3,4,5] %}
+                <option value="{{ n }}" {% if n == 3 %}selected{% endif %}>{{ n }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+
+        <div style="margin-top:10px;">
+          <label>希望對方現在回覆嗎</label>
+          <div class="row" style="margin-top:6px;">
+            <label><input type="radio" name="wants_reply_now" value="1" checked /> 是</label>
+            <label><input type="radio" name="wants_reply_now" value="0" /> 否</label>
+          </div>
+        </div>
+
+        <div style="margin-top:10px;">
+          <label>2) 我現在需要</label>
+          <div class="check-grid">
+            {% for key, label in need_options %}
+              <label><input type="radio" name="need_type" value="{{ key }}" {% if loop.first %}checked{% endif %} /> {{ label }}</label>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div style="margin-top:14px;">
+          <button class="btn" type="submit">送出（先抒發）</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div style="font-size:20px; font-weight:800;">事件回顧與修復</div>
+      <div class="tiny">包含：冷卻計時、修復任務卡、觸發點記錄、雙方已修復。</div>
+
+      <div style="margin-top:12px;">
+        {% if not events %}
+          <div class="tiny">目前沒有事件，先從上面的情緒投遞箱開始。</div>
+        {% endif %}
+        {% for ev in events %}
+          <div class="event">
+            <div class="row" style="justify-content:space-between;">
+              <div>
+                <strong>#{{ ev.id }}</strong> · {{ ev.owner_label }} · {{ ev.created_at }}
+              </div>
+              <div class="row">
+                {% if ev.closed %}
+                  <span class="pill pill-closed">已修復</span>
+                {% else %}
+                  <span class="pill pill-open">處理中</span>
+                {% endif %}
+                {% if ev.cooldown_left > 0 %}
+                  <span class="pill pill-cool">冷卻 {{ ev.cooldown_left }} 分鐘</span>
+                {% endif %}
+              </div>
+            </div>
+
+            <div class="tiny" style="margin-top:4px;">
+              情緒：{{ ev.emotion_label }} · 強度：{{ ev.intensity }} · 需要：{{ ev.need_label }} · 立即回覆：{{ "是" if ev.wants_reply_now else "否" }}
+            </div>
+            <div class="line"></div>
+            <div>{{ ev.vent_text }}</div>
+
+            {% if ev.cooldown_active_for_me %}
+              <div class="warn" style="margin-top:12px;">
+                3) 冷卻計時器啟動中：先不要解釋，先安撫。剩餘 {{ ev.cooldown_left }} 分鐘。
+              </div>
+            {% endif %}
+
+            {% if ev.show_task_cards %}
+              <div style="margin-top:12px;">
+                <strong>4) 修復任務卡</strong>
+                <ul class="list">
+                  {% for t in ev.task_cards %}
+                    <li>{{ t }}</li>
+                  {% endfor %}
+                </ul>
+              </div>
+            {% endif %}
+
+            {% if ev.can_edit_triggers %}
+              <form method="post" style="margin-top:12px;">
+                <input type="hidden" name="action" value="save_triggers" />
+                <input type="hidden" name="event_id" value="{{ ev.id }}" />
+                <div><strong>5) 觸發點記錄</strong></div>
+                <div class="check-grid">
+                  {% for tk, tl in trigger_options %}
+                    <label><input type="checkbox" name="trigger_keys" value="{{ tk }}" {% if tk in ev.triggers %}checked{% endif %} /> {{ tl }}</label>
+                  {% endfor %}
+                </div>
+                <div style="margin-top:8px;"><button type="submit" class="btn btn-light">儲存觸發點</button></div>
+              </form>
+            {% endif %}
+
+            {% if ev.can_confirm %}
+              <form method="post" style="margin-top:12px;">
+                <input type="hidden" name="action" value="confirm" />
+                <input type="hidden" name="event_id" value="{{ ev.id }}" />
+                <div class="row">
+                  <div class="tiny mono">6) 和好儀式：{{ ev.confirmed_count }}/{{ ev.participant_count }} 已確認</div>
+                  {% if ev.i_confirmed %}
+                    <span class="pill pill-closed">你已按「已修復」</span>
+                  {% elif not ev.closed %}
+                    <button class="btn" type="submit">我這邊已修復</button>
+                  {% endif %}
+                </div>
+              </form>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
 # ===== Dashboard (private, LINE-issued magic link) =====
 # 目的：把「LINE 可以問到的資料」用更漂亮的方式呈現在網站上（避免公開洩漏，所以必須登入）。
 #
@@ -4249,6 +4497,27 @@ DASH_MAGIC_TOKEN_TTL_SECONDS = int(os.getenv("DASH_MAGIC_TOKEN_TTL_SECONDS", "60
 DASH_SESSION_TTL_SECONDS = int(os.getenv("DASH_SESSION_TTL_SECONDS", "43200"))        # session 有效秒數（預設 12 小時）
 
 _LAST_TASK_EXPIRE_SWEEP_TS = 0.0  # throttle expire_open_photo_tasks on /dash/tasks
+
+REPAIR_EMOTION_OPTIONS = [
+    ("hurt", "委屈"),
+    ("angry", "生氣"),
+    ("disappointed", "失望"),
+    ("anxious", "焦慮"),
+]
+
+REPAIR_NEED_OPTIONS = [
+    ("companionship", "先陪我，不要講道理"),
+    ("comfort", "給我抱抱/安慰"),
+    ("solve", "幫我一起想解法"),
+    ("cooldown", "我想自己冷靜 30 分鐘"),
+]
+
+REPAIR_TRIGGER_OPTIONS = [
+    ("tone", "口氣"),
+    ("no_reply", "已讀不回"),
+    ("schedule_change", "臨時改行程"),
+    ("joke_too_far", "開玩笑過頭"),
+]
 
 DASH_LOGIN_REQUIRED_TEMPLATE = """<!doctype html>
 <html lang="zh-Hant">
@@ -4393,6 +4662,81 @@ def _dash_require_api():
     if _dashboard_session_valid():
         return
     abort(401)
+
+
+def _dash_current_uid() -> str:
+    return (session.get("dash_uid") or "").strip()
+
+
+def _dash_pair_for_uid(base: dict, uid: str) -> tuple[str | None, str, str | None, str]:
+    uid = (uid or "").strip()
+    gf_id = (base.get("gf_id") or "").strip()
+    bf_id = (base.get("bf_id") or "").strip()
+    gf_name = base.get("gf_name") or "女方"
+    bf_name = base.get("bf_name") or "男方"
+
+    if uid and uid == gf_id:
+        return gf_id or None, gf_name, bf_id or None, bf_name
+    if uid and uid == bf_id:
+        return bf_id or None, bf_name, gf_id or None, gf_name
+
+    # fallback: unknown uid (rare), still return a stable pair
+    me_name = _safe_name(uid) or "你"
+    if gf_id:
+        return uid or None, me_name, gf_id, gf_name
+    if bf_id:
+        return uid or None, me_name, bf_id, bf_name
+    return uid or None, me_name, None, "對方"
+
+
+def _repair_label_from_options(key: str, options: list[tuple[str, str]], default: str = "未設定") -> str:
+    k = (key or "").strip()
+    for opt_key, opt_label in options:
+        if k == opt_key:
+            return opt_label
+    return default
+
+
+def _repair_emotion_label(key: str) -> str:
+    return _repair_label_from_options(key, REPAIR_EMOTION_OPTIONS, default="其他")
+
+
+def _repair_need_label(key: str) -> str:
+    return _repair_label_from_options(key, REPAIR_NEED_OPTIONS, default="先被理解")
+
+
+def _repair_trigger_label(key: str) -> str:
+    return _repair_label_from_options(key, REPAIR_TRIGGER_OPTIONS, default=key or "其他")
+
+
+def _repair_cooldown_minutes_remaining(cooldown_until: str | None) -> int:
+    dt = _parse_dt(cooldown_until)
+    if not dt:
+        return 0
+    left = int((dt - _tz_now()).total_seconds() // 60)
+    return max(0, left)
+
+
+def _repair_task_cards(ev: dict) -> list[str]:
+    needs = _repair_need_label(ev.get("need_type") or "")
+    return [
+        "先道歉一句，不反駁。",
+        "重述她在意點（1 句，不下判斷）。",
+        f"問：你希望我現在怎麼做？（可參考：{needs}）",
+    ]
+
+
+def _repair_badge(streak_days: int) -> str:
+    d = int(max(0, streak_days))
+    if d >= 30:
+        return "穩定維護 30 天"
+    if d >= 14:
+        return "修復默契 14 天"
+    if d >= 7:
+        return "冷靜回合 7 天"
+    if d >= 3:
+        return "先安撫再溝通 3 天"
+    return "今天也在練習"
 
 
 def _get_couple_setting(key: str, gf_id: str | None, bf_id: str | None) -> str:
@@ -4712,6 +5056,169 @@ def dash():
         return resp
     data = _build_dashboard_data()
     return render_template_string(DASH_TEMPLATE, **data)
+
+
+@app.route("/dash/repair", methods=["GET", "POST"])
+def dash_repair():
+    resp = _dash_require_page()
+    if resp is not None:
+        return resp
+
+    base = _build_dash_base()
+    uid = _dash_current_uid()
+    me_id, me_name, other_id, other_name = _dash_pair_for_uid(base, uid)
+    status = ""
+    error = ""
+
+    emotion_keys = {k for k, _ in REPAIR_EMOTION_OPTIONS}
+    need_keys = {k for k, _ in REPAIR_NEED_OPTIONS}
+    trigger_keys = {k for k, _ in REPAIR_TRIGGER_OPTIONS}
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip()
+        try:
+            if action == "create":
+                if not me_id:
+                    raise ValueError("找不到目前登入身份")
+
+                vent_text = (request.form.get("vent_text") or "").strip()
+                emotion_type = (request.form.get("emotion_type") or "hurt").strip()
+                need_type = (request.form.get("need_type") or "companionship").strip()
+                try:
+                    intensity = int(request.form.get("intensity") or 3)
+                except Exception:
+                    intensity = 3
+                intensity = max(1, min(5, intensity))
+                wants_reply_now = (request.form.get("wants_reply_now") or "1").strip() == "1"
+
+                if not vent_text:
+                    raise ValueError("請先填寫『今天不爽什麼』")
+                if emotion_type not in emotion_keys:
+                    emotion_type = "hurt"
+                if need_type not in need_keys:
+                    need_type = "companionship"
+
+                cooldown_until = None
+                if intensity >= 4:
+                    cool_mins = 20 if intensity == 4 else 40
+                    cooldown_until = (_tz_now() + datetime.timedelta(minutes=cool_mins)).isoformat(timespec="seconds")
+
+                event_id = create_conflict_event(
+                    db_path=LOVE_DB_PATH,
+                    created_by=me_id,
+                    target_user_id=other_id,
+                    vent_text=vent_text,
+                    emotion_type=emotion_type,
+                    intensity=intensity,
+                    wants_reply_now=wants_reply_now,
+                    need_type=need_type,
+                    cooldown_until=cooldown_until,
+                )
+                status = f"已建立修復事件 #{event_id}。"
+
+            elif action == "save_triggers":
+                event_id = int(request.form.get("event_id") or 0)
+                ev = get_conflict_event(db_path=LOVE_DB_PATH, event_id=event_id)
+                if not ev:
+                    raise ValueError("事件不存在")
+                participants = {
+                    (ev.get("created_by") or "").strip(),
+                    (ev.get("target_user_id") or "").strip(),
+                }
+                participants.discard("")
+                if uid not in participants:
+                    raise ValueError("你不是這個事件的參與者")
+                chosen = [(x or "").strip() for x in request.form.getlist("trigger_keys")]
+                chosen = [x for x in chosen if x in trigger_keys]
+                set_conflict_event_triggers(db_path=LOVE_DB_PATH, event_id=event_id, trigger_keys=chosen)
+                status = f"已更新事件 #{event_id} 的觸發點。"
+
+            elif action == "confirm":
+                event_id = int(request.form.get("event_id") or 0)
+                result = confirm_conflict_event(db_path=LOVE_DB_PATH, event_id=event_id, user_id=uid)
+                if not result.get("ok"):
+                    reason = result.get("reason") or "unknown"
+                    reason_text = {
+                        "user_required": "找不到登入使用者",
+                        "not_found": "事件不存在",
+                        "not_participant": "你不是這個事件的參與者",
+                    }.get(reason, reason)
+                    raise ValueError(reason_text)
+                if result.get("closed"):
+                    status = f"事件 #{event_id} 已完成雙方修復。"
+                else:
+                    status = f"已送出你對事件 #{event_id} 的修復確認。"
+        except Exception as e:
+            error = f"操作失敗：{e}"
+
+    raw_events = list_conflict_events(db_path=LOVE_DB_PATH, limit=40, user_id=uid or None)
+    events = []
+    for ev in raw_events:
+        event_id = int(ev.get("id") or 0)
+        created_by = (ev.get("created_by") or "").strip()
+        target_uid = (ev.get("target_user_id") or "").strip()
+        participants = []
+        for pid in (created_by, target_uid):
+            if pid and pid not in participants:
+                participants.append(pid)
+
+        confirmed_users = list_conflict_confirmed_users(db_path=LOVE_DB_PATH, event_id=event_id)
+        trigger_rows = list_conflict_triggers_for_event(db_path=LOVE_DB_PATH, event_id=event_id)
+        cooldown_left = _repair_cooldown_minutes_remaining(ev.get("cooldown_until"))
+        closed = bool(ev.get("closed_at"))
+        in_my_cooldown = bool(cooldown_left > 0 and uid and uid == target_uid)
+
+        events.append(
+            {
+                "id": event_id,
+                "owner_label": "你" if created_by and created_by == uid else "對方",
+                "created_at": ev.get("created_at") or "",
+                "vent_text": ev.get("vent_text") or "",
+                "emotion_label": _repair_emotion_label(ev.get("emotion_type") or ""),
+                "intensity": int(ev.get("intensity") or 0),
+                "need_label": _repair_need_label(ev.get("need_type") or ""),
+                "wants_reply_now": bool(ev.get("wants_reply_now")),
+                "cooldown_left": cooldown_left,
+                "cooldown_active_for_me": in_my_cooldown,
+                "show_task_cards": bool(uid and uid == target_uid and not closed and not in_my_cooldown),
+                "task_cards": _repair_task_cards(ev),
+                "triggers": trigger_rows,
+                "can_edit_triggers": bool(uid in participants and not in_my_cooldown),
+                "can_confirm": bool(uid in participants and not in_my_cooldown),
+                "i_confirmed": bool(uid in set(confirmed_users)),
+                "confirmed_count": len(set(confirmed_users)),
+                "participant_count": len(participants),
+                "closed": closed,
+            }
+        )
+
+    trigger_top = []
+    for row in list_conflict_trigger_top(db_path=LOVE_DB_PATH, days=7, limit=3):
+        trigger_top.append(
+            {
+                "key": row["trigger_key"],
+                "label": _repair_trigger_label(row["trigger_key"]),
+                "count": int(row["count"]),
+            }
+        )
+
+    streak_days = get_no_blowup_streak_days(db_path=LOVE_DB_PATH, intense_threshold=4)
+
+    return render_template_string(
+        DASH_REPAIR_TEMPLATE,
+        **base,
+        status=status,
+        error=error,
+        me_name=me_name,
+        other_name=other_name,
+        emotion_options=REPAIR_EMOTION_OPTIONS,
+        need_options=REPAIR_NEED_OPTIONS,
+        trigger_options=REPAIR_TRIGGER_OPTIONS,
+        events=events,
+        trigger_top=trigger_top,
+        streak_days=streak_days,
+        streak_badge=_repair_badge(streak_days),
+    )
 
 
 @app.route("/dash/tasks")

@@ -267,6 +267,54 @@ def seed_defaults(db_path: str = DEFAULT_DB):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_dash_tokens_user_exp ON dashboard_magic_tokens(user_id, expires_at);")
 
+    # conflict repair workflow (vent -> cooldown -> repair -> review)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conflict_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_by TEXT NOT NULL,
+            target_user_id TEXT,
+            vent_text TEXT NOT NULL,
+            emotion_type TEXT NOT NULL,
+            intensity INTEGER NOT NULL,
+            wants_reply_now INTEGER NOT NULL DEFAULT 1,
+            need_type TEXT NOT NULL,
+            cooldown_until TEXT,
+            closed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_conflict_events_open ON conflict_events(closed_at, created_at DESC);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_conflict_events_target ON conflict_events(target_user_id, created_at DESC);")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conflict_event_triggers (
+            event_id INTEGER NOT NULL,
+            trigger_key TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(event_id, trigger_key),
+            FOREIGN KEY(event_id) REFERENCES conflict_events(id) ON DELETE CASCADE
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_conflict_triggers_key_created ON conflict_event_triggers(trigger_key, created_at DESC);")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conflict_event_confirms (
+            event_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
+            confirmed_at TEXT NOT NULL,
+            PRIMARY KEY(event_id, user_id),
+            FOREIGN KEY(event_id) REFERENCES conflict_events(id) ON DELETE CASCADE
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_conflict_confirms_user ON conflict_event_confirms(user_id, confirmed_at DESC);")
+
 
 
     conn.commit()
@@ -1154,5 +1202,304 @@ def consume_dashboard_magic_token(db_path: str, token: str) -> Optional[str]:
         if getattr(cur, "rowcount", 0) != 1:
             return None
         return row["user_id"]
+    finally:
+        conn.close()
+
+
+# ===== conflict repair workflow =====
+def create_conflict_event(
+    db_path: str,
+    created_by: str,
+    target_user_id: str | None,
+    vent_text: str,
+    emotion_type: str,
+    intensity: int,
+    wants_reply_now: bool,
+    need_type: str,
+    cooldown_until: str | None = None,
+) -> int:
+    created_by = (created_by or "").strip()
+    target_user_id = (target_user_id or "").strip() or None
+    vent_text = (vent_text or "").strip()
+    emotion_type = (emotion_type or "").strip()
+    need_type = (need_type or "").strip()
+    intensity = int(max(1, min(5, int(intensity))))
+    if not created_by:
+        raise ValueError("created_by is required")
+    if not vent_text:
+        raise ValueError("vent_text is required")
+    if not emotion_type:
+        raise ValueError("emotion_type is required")
+    if not need_type:
+        raise ValueError("need_type is required")
+
+    conn = _conn(db_path)
+    try:
+        now = _tz_now_iso()
+        cur = _execute(
+            conn,
+            """
+            INSERT INTO conflict_events(
+                created_by, target_user_id, vent_text, emotion_type, intensity,
+                wants_reply_now, need_type, cooldown_until, closed_at, created_at, updated_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                created_by,
+                target_user_id,
+                vent_text,
+                emotion_type,
+                intensity,
+                1 if wants_reply_now else 0,
+                need_type,
+                (cooldown_until or "").strip() or None,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+    finally:
+        conn.close()
+
+
+def get_conflict_event(db_path: str, event_id: int) -> Optional[dict]:
+    conn = _conn(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM conflict_events
+            WHERE id=?
+            """,
+            (int(event_id),),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_conflict_events(db_path: str, limit: int = 30, user_id: str | None = None) -> list[dict]:
+    limit = max(1, min(200, int(limit)))
+    uid = (user_id or "").strip()
+    conn = _conn(db_path)
+    try:
+        if uid:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM conflict_events
+                WHERE created_by=? OR target_user_id=?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (uid, uid, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM conflict_events
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def list_open_conflict_events(db_path: str, limit: int = 20, user_id: str | None = None) -> list[dict]:
+    limit = max(1, min(200, int(limit)))
+    uid = (user_id or "").strip()
+    conn = _conn(db_path)
+    try:
+        if uid:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM conflict_events
+                WHERE closed_at IS NULL AND (created_by=? OR target_user_id=?)
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (uid, uid, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM conflict_events
+                WHERE closed_at IS NULL
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def list_conflict_triggers_for_event(db_path: str, event_id: int) -> list[str]:
+    conn = _conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT trigger_key
+            FROM conflict_event_triggers
+            WHERE event_id=?
+            ORDER BY trigger_key
+            """,
+            (int(event_id),),
+        ).fetchall()
+        return [str(r["trigger_key"]) for r in rows]
+    finally:
+        conn.close()
+
+
+def set_conflict_event_triggers(db_path: str, event_id: int, trigger_keys: list[str]) -> list[str]:
+    clean = sorted({(x or "").strip() for x in (trigger_keys or []) if (x or "").strip()})
+    conn = _conn(db_path)
+    try:
+        now = _tz_now_iso()
+        _execute(conn, "DELETE FROM conflict_event_triggers WHERE event_id=?", (int(event_id),))
+        for k in clean:
+            _execute(
+                conn,
+                """
+                INSERT OR IGNORE INTO conflict_event_triggers(event_id, trigger_key, created_at)
+                VALUES(?, ?, ?)
+                """,
+                (int(event_id), k, now),
+            )
+        _execute(conn, "UPDATE conflict_events SET updated_at=? WHERE id=?", (now, int(event_id)))
+        conn.commit()
+        return clean
+    finally:
+        conn.close()
+
+
+def list_conflict_confirmed_users(db_path: str, event_id: int) -> list[str]:
+    conn = _conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT user_id
+            FROM conflict_event_confirms
+            WHERE event_id=?
+            ORDER BY user_id
+            """,
+            (int(event_id),),
+        ).fetchall()
+        return [str(r["user_id"]) for r in rows]
+    finally:
+        conn.close()
+
+
+def confirm_conflict_event(db_path: str, event_id: int, user_id: str) -> dict:
+    user_id = (user_id or "").strip()
+    if not user_id:
+        return {"ok": False, "reason": "user_required"}
+
+    conn = _conn(db_path)
+    try:
+        ev = conn.execute(
+            "SELECT id, created_by, target_user_id, closed_at FROM conflict_events WHERE id=?",
+            (int(event_id),),
+        ).fetchone()
+        if not ev:
+            return {"ok": False, "reason": "not_found"}
+
+        participants = []
+        for uid in (ev["created_by"], ev["target_user_id"]):
+            uid = (uid or "").strip()
+            if uid and uid not in participants:
+                participants.append(uid)
+
+        if user_id not in participants:
+            return {"ok": False, "reason": "not_participant"}
+
+        now = _tz_now_iso()
+        _execute(
+            conn,
+            """
+            INSERT OR IGNORE INTO conflict_event_confirms(event_id, user_id, confirmed_at)
+            VALUES(?, ?, ?)
+            """,
+            (int(event_id), user_id, now),
+        )
+
+        rows = conn.execute(
+            "SELECT user_id FROM conflict_event_confirms WHERE event_id=?",
+            (int(event_id),),
+        ).fetchall()
+        confirmed = {(r["user_id"] or "").strip() for r in rows if (r["user_id"] or "").strip()}
+
+        closed = all(uid in confirmed for uid in participants)
+        if closed and not ev["closed_at"]:
+            _execute(
+                conn,
+                "UPDATE conflict_events SET closed_at=?, updated_at=? WHERE id=?",
+                (now, now, int(event_id)),
+            )
+        else:
+            _execute(conn, "UPDATE conflict_events SET updated_at=? WHERE id=?", (now, int(event_id)))
+        conn.commit()
+
+        return {
+            "ok": True,
+            "closed": closed,
+            "participants": participants,
+            "confirmed_users": sorted(confirmed),
+        }
+    finally:
+        conn.close()
+
+
+def list_conflict_trigger_top(db_path: str, days: int = 7, limit: int = 3) -> list[dict]:
+    days = max(1, min(90, int(days)))
+    limit = max(1, min(20, int(limit)))
+    since = (datetime.datetime.now(_tz()) - datetime.timedelta(days=days)).isoformat(timespec="seconds")
+    conn = _conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT trigger_key, COUNT(*) AS c
+            FROM conflict_event_triggers
+            WHERE created_at>=?
+            GROUP BY trigger_key
+            ORDER BY c DESC, trigger_key ASC
+            LIMIT ?
+            """,
+            (since, limit),
+        ).fetchall()
+        return [{"trigger_key": r["trigger_key"], "count": int(r["c"])} for r in rows]
+    finally:
+        conn.close()
+
+
+def get_no_blowup_streak_days(db_path: str, intense_threshold: int = 4) -> int:
+    threshold = max(1, min(5, int(intense_threshold)))
+    conn = _conn(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT created_at
+            FROM conflict_events
+            WHERE intensity>=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (threshold,),
+        ).fetchone()
+        if not row:
+            return 0
+        dt = _parse_dt_any(row["created_at"])
+        today = datetime.datetime.now(_tz()).date()
+        days = (today - dt.date()).days
+        return max(0, int(days))
     finally:
         conn.close()
