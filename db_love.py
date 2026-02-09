@@ -280,6 +280,7 @@ def seed_defaults(db_path: str = DEFAULT_DB):
             wants_reply_now INTEGER NOT NULL DEFAULT 1,
             need_type TEXT NOT NULL,
             cooldown_until TEXT,
+            cooldown_notified_at TEXT,
             closed_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -288,6 +289,7 @@ def seed_defaults(db_path: str = DEFAULT_DB):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_conflict_events_open ON conflict_events(closed_at, created_at DESC);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_conflict_events_target ON conflict_events(target_user_id, created_at DESC);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_conflict_events_created_by ON conflict_events(created_by, created_at DESC);")
 
     cur.execute(
         """
@@ -314,6 +316,25 @@ def seed_defaults(db_path: str = DEFAULT_DB):
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_conflict_confirms_user ON conflict_event_confirms(user_id, confirmed_at DESC);")
+
+    # stress game sessions
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS game_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            target_user_id TEXT,
+            total_damage INTEGER NOT NULL DEFAULT 0,
+            max_combo INTEGER NOT NULL DEFAULT 0,
+            ko_count INTEGER NOT NULL DEFAULT 0,
+            round_reached INTEGER NOT NULL DEFAULT 1,
+            tool_breakdown TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_game_sessions_user_created ON game_sessions(user_id, created_at DESC);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_game_sessions_created ON game_sessions(created_at DESC);")
 
 
 
@@ -361,6 +382,15 @@ def seed_defaults(db_path: str = DEFAULT_DB):
             conn.execute("ALTER TABLE media ADD COLUMN content_type TEXT;")
         if "from_user_id" not in cols:
             conn.execute("ALTER TABLE media ADD COLUMN from_user_id TEXT;")
+        conn.commit()
+    except Exception:
+        pass
+
+    # Light schema migration for conflict_events (new optional columns)
+    try:
+        cols = _table_cols(conn, "conflict_events")
+        if "cooldown_notified_at" not in cols:
+            conn.execute("ALTER TABLE conflict_events ADD COLUMN cooldown_notified_at TEXT;")
         conn.commit()
     except Exception:
         pass
@@ -1501,5 +1531,173 @@ def get_no_blowup_streak_days(db_path: str, intense_threshold: int = 4) -> int:
         today = datetime.datetime.now(_tz()).date()
         days = (today - dt.date()).days
         return max(0, int(days))
+    finally:
+        conn.close()
+
+
+def list_conflict_triggers_map(db_path: str, event_ids: list[int]) -> dict[int, list[str]]:
+    ids = sorted({int(x) for x in (event_ids or []) if int(x) > 0})
+    if not ids:
+        return {}
+    placeholders = ",".join(["?"] * len(ids))
+    conn = _conn(db_path)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT event_id, trigger_key
+            FROM conflict_event_triggers
+            WHERE event_id IN ({placeholders})
+            ORDER BY event_id ASC, trigger_key ASC
+            """,
+            tuple(ids),
+        ).fetchall()
+        out: dict[int, list[str]] = {eid: [] for eid in ids}
+        for r in rows:
+            eid = int(r["event_id"])
+            out.setdefault(eid, []).append(str(r["trigger_key"]))
+        return out
+    finally:
+        conn.close()
+
+
+def list_conflict_confirms_map(db_path: str, event_ids: list[int]) -> dict[int, list[str]]:
+    ids = sorted({int(x) for x in (event_ids or []) if int(x) > 0})
+    if not ids:
+        return {}
+    placeholders = ",".join(["?"] * len(ids))
+    conn = _conn(db_path)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT event_id, user_id
+            FROM conflict_event_confirms
+            WHERE event_id IN ({placeholders})
+            ORDER BY event_id ASC, user_id ASC
+            """,
+            tuple(ids),
+        ).fetchall()
+        out: dict[int, list[str]] = {eid: [] for eid in ids}
+        for r in rows:
+            eid = int(r["event_id"])
+            uid = (r["user_id"] or "").strip()
+            if uid:
+                out.setdefault(eid, []).append(uid)
+        return out
+    finally:
+        conn.close()
+
+
+def list_conflict_events_ready_for_cooldown_notify(db_path: str, now_iso: str, limit: int = 30) -> list[dict]:
+    limit = max(1, min(200, int(limit)))
+    conn = _conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, created_by, target_user_id, cooldown_until
+            FROM conflict_events
+            WHERE closed_at IS NULL
+              AND cooldown_until IS NOT NULL
+              AND cooldown_until <> ''
+              AND cooldown_until <= ?
+              AND (cooldown_notified_at IS NULL OR cooldown_notified_at = '')
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (str(now_iso), limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def mark_conflict_cooldown_notified(db_path: str, event_id: int, notified_at_iso: str):
+    conn = _conn(db_path)
+    try:
+        _execute(
+            conn,
+            """
+            UPDATE conflict_events
+            SET cooldown_notified_at=?, updated_at=?
+            WHERE id=? AND (cooldown_notified_at IS NULL OR cooldown_notified_at='')
+            """,
+            (str(notified_at_iso), str(notified_at_iso), int(event_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_game_session(
+    db_path: str,
+    user_id: str,
+    target_user_id: str | None,
+    total_damage: int,
+    max_combo: int,
+    ko_count: int,
+    round_reached: int,
+    tool_breakdown: str | None = None,
+) -> int:
+    user_id = (user_id or "").strip()
+    if not user_id:
+        raise ValueError("user_id is required")
+    target_user_id = (target_user_id or "").strip() or None
+    total_damage = max(0, int(total_damage))
+    max_combo = max(0, int(max_combo))
+    ko_count = max(0, int(ko_count))
+    round_reached = max(1, int(round_reached))
+    tool_breakdown = (tool_breakdown or "").strip() or None
+
+    conn = _conn(db_path)
+    try:
+        cur = _execute(
+            conn,
+            """
+            INSERT INTO game_sessions(
+                user_id, target_user_id, total_damage, max_combo, ko_count, round_reached, tool_breakdown, created_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                target_user_id,
+                total_damage,
+                max_combo,
+                ko_count,
+                round_reached,
+                tool_breakdown,
+                _tz_now_iso(),
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+    finally:
+        conn.close()
+
+
+def get_game_week_stats(db_path: str, user_id: str) -> dict:
+    uid = (user_id or "").strip()
+    if not uid:
+        return {"plays": 0, "sum_ko": 0, "sum_damage": 0, "max_combo": 0}
+    since = (datetime.datetime.now(_tz()) - datetime.timedelta(days=7)).isoformat(timespec="seconds")
+    conn = _conn(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS plays,
+                COALESCE(SUM(ko_count), 0) AS sum_ko,
+                COALESCE(SUM(total_damage), 0) AS sum_damage,
+                COALESCE(MAX(max_combo), 0) AS max_combo
+            FROM game_sessions
+            WHERE user_id=? AND created_at>=?
+            """,
+            (uid, since),
+        ).fetchone()
+        return {
+            "plays": int(row["plays"] or 0),
+            "sum_ko": int(row["sum_ko"] or 0),
+            "sum_damage": int(row["sum_damage"] or 0),
+            "max_combo": int(row["max_combo"] or 0),
+        }
     finally:
         conn.close()

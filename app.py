@@ -8,6 +8,7 @@ import time
 import asyncio
 import threading
 import mimetypes
+import json
 from PIL import Image, ImageOps
 from pathlib import Path
 from typing import Optional
@@ -77,6 +78,12 @@ from db_love import (
     confirm_conflict_event,
     list_conflict_trigger_top,
     get_no_blowup_streak_days,
+    list_conflict_triggers_map,
+    list_conflict_confirms_map,
+    list_conflict_events_ready_for_cooldown_notify,
+    mark_conflict_cooldown_notified,
+    create_game_session,
+    get_game_week_stats,
 )
 
 
@@ -2925,6 +2932,15 @@ def scheduled_duo_remind():
     push_to_couple_text(msg, fallback_user_id=None)
     print("[SCHED][DUO] reminder pushed.", flush=True)
 
+
+def scheduled_repair_cooldown_scan():
+    try:
+        sent = _repair_process_cooldown_end_notifications(limit=50)
+        if sent:
+            print(f"[SCHED][REPAIR] cooldown-end notifications sent={sent}", flush=True)
+    except Exception as e:
+        print("[SCHED][REPAIR] scan error:", e, flush=True)
+
 def _scheduler_remove_if_exists(sched: BackgroundScheduler, job_id: str):
     try:
         sched.remove_job(job_id)
@@ -2998,6 +3014,19 @@ def _scheduler_apply_settings(sched: BackgroundScheduler):
         print(f"[SCHED] Duo job applied: {sh:02d}:00-{eh:02d}:59 every {every}m", flush=True)
     except Exception as e:
         print("[SCHED][DUO] add_job error:", e, flush=True)
+
+    # ===== repair cooldown scan (every minute) =====
+    _scheduler_remove_if_exists(sched, "repair_cooldown_scan")
+    try:
+        sched.add_job(
+            scheduled_repair_cooldown_scan,
+            "interval",
+            minutes=1,
+            id="repair_cooldown_scan",
+            replace_existing=True,
+        )
+    except Exception as e:
+        print("[SCHED][REPAIR] add_job error:", e, flush=True)
 
 
 def refresh_scheduler_jobs():
@@ -4682,10 +4711,24 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         <div class="card">
           <div style="font-size:22px; font-weight:900;">工具箱</div>
           <div class="tools" id="tools"></div>
+          <div class="stats" style="margin-top:12px;">
+            <div class="stat"><div class="muted" style="font-size:12px;">本週場次</div><div id="weekPlays" style="font-size:26px; font-weight:900;">{{ week_stats.plays }}</div></div>
+            <div class="stat"><div class="muted" style="font-size:12px;">本週 KO</div><div id="weekKo" style="font-size:26px; font-weight:900;">{{ week_stats.sum_ko }}</div></div>
+            <div class="stat"><div class="muted" style="font-size:12px;">本週最高連擊</div><div id="weekMaxCombo" style="font-size:26px; font-weight:900;">{{ week_stats.max_combo }}</div></div>
+          </div>
           <div class="stats">
             <div class="stat"><div class="muted" style="font-size:12px;">總傷害</div><div id="totalDmg" style="font-size:26px; font-weight:900;">0</div></div>
             <div class="stat"><div class="muted" style="font-size:12px;">連擊</div><div id="combo" style="font-size:26px; font-weight:900;">x1</div></div>
             <div class="stat"><div class="muted" style="font-size:12px;">KO 次數</div><div id="koCount" style="font-size:26px; font-weight:900;">0</div></div>
+          </div>
+          <div class="stat" style="margin-top:10px;">
+            <div class="muted" style="font-size:12px;">效果設定</div>
+            <label style="display:block; margin-top:8px;"><input id="soundToggle" type="checkbox" checked /> 音效</label>
+            <label style="display:block; margin-top:4px;"><input id="vibeToggle" type="checkbox" checked /> 震動（手機）</label>
+          </div>
+          <div class="stat" style="margin-top:10px;">
+            <div class="muted" style="font-size:12px;">KO 任務獎勵（導向修復）</div>
+            <div id="rewardList" style="margin-top:8px; font-size:13px;"></div>
           </div>
           <div class="note">
             說明：純虛擬紓壓遊戲，不鼓勵現實暴力。<br/>
@@ -4700,6 +4743,7 @@ DASH_GAME_TEMPLATE = """<!doctype html>
   <script>
     (() => {
       const STORAGE_KEY = "dash_stress_game_v2";
+      const rewardDefs = {{ game_rewards_json|safe }};
       const tools = [
         { id: "pillow", name: "軟枕頭", min: 6, max: 12, fx: "啪！", shake: 1 },
         { id: "slipper", name: "拖鞋", min: 10, max: 18, fx: "咻啪！", shake: 1.25 },
@@ -4715,9 +4759,15 @@ DASH_GAME_TEMPLATE = """<!doctype html>
       const totalDmgEl = document.getElementById("totalDmg");
       const comboEl = document.getElementById("combo");
       const koCountEl = document.getElementById("koCount");
+      const weekPlaysEl = document.getElementById("weekPlays");
+      const weekKoEl = document.getElementById("weekKo");
+      const weekMaxComboEl = document.getElementById("weekMaxCombo");
       const hitBtn = document.getElementById("hitBtn");
       const healBtn = document.getElementById("healBtn");
       const resetBtn = document.getElementById("resetBtn");
+      const soundToggle = document.getElementById("soundToggle");
+      const vibeToggle = document.getElementById("vibeToggle");
+      const rewardList = document.getElementById("rewardList");
       const arena = document.getElementById("arena");
       const hitFlash = document.getElementById("hitFlash");
       const dummy = document.getElementById("dummy");
@@ -4731,9 +4781,13 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         hp: 100,
         totalDamage: 0,
         combo: 1,
+        maxCombo: 1,
         koCount: 0,
         selectedTool: "pillow",
-        lastHitTs: 0
+        lastHitTs: 0,
+        soundOn: true,
+        vibeOn: true,
+        toolHits: {}
       };
 
       function pickTool() { return tools.find(t => t.id === state.selectedTool) || tools[0]; }
@@ -4746,6 +4800,73 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         if (r > 0.35) return 2;
         if (r > 0.15) return 3;
         return 4;
+      }
+
+      function renderRewards() {
+        rewardList.innerHTML = "";
+        for (const r of rewardDefs) {
+          const unlocked = state.koCount >= Number(r.ko || 0);
+          const row = document.createElement("div");
+          row.style.marginBottom = "6px";
+          row.innerHTML =
+            (unlocked ? "✅ " : "🔒 ") +
+            "KO " + r.ko + " · " + r.title + "：" +
+            "<span style='color:" + (unlocked ? "#0f766e" : "#64748b") + ";'>" + r.task + "</span>";
+          rewardList.appendChild(row);
+        }
+      }
+
+      function beep(freq, duration, type) {
+        if (!state.soundOn) return;
+        try {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (!Ctx) return;
+          const ctx = new Ctx();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = type || "square";
+          osc.frequency.value = freq;
+          gain.gain.value = 0.0001;
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          const now = ctx.currentTime;
+          gain.gain.exponentialRampToValueAtTime(0.11, now + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + duration / 1000.0);
+          osc.start(now);
+          osc.stop(now + duration / 1000.0 + 0.02);
+          setTimeout(() => { try { ctx.close(); } catch (_) {} }, duration + 90);
+        } catch (_) {}
+      }
+
+      function pulseVibe(ms) {
+        if (!state.vibeOn) return;
+        try { if (navigator.vibrate) navigator.vibrate(ms); } catch (_) {}
+      }
+
+      async function saveReport(reason) {
+        try {
+          const payload = {
+            reason: reason || "manual",
+            total_damage: state.totalDamage,
+            max_combo: state.maxCombo,
+            ko_count: state.koCount,
+            round_reached: state.round,
+            tool_breakdown: state.toolHits || {}
+          };
+          const resp = await fetch("/dash/game/report", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          if (!resp.ok) return;
+          const out = await resp.json();
+          if (!out || !out.ok) return;
+          if (out.week_stats) {
+            weekPlaysEl.textContent = String(out.week_stats.plays || 0);
+            weekKoEl.textContent = String(out.week_stats.sum_ko || 0);
+            weekMaxComboEl.textContent = String(out.week_stats.max_combo || 0);
+          }
+        } catch (_) {}
       }
 
       function renderTools() {
@@ -4770,6 +4891,7 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         koCountEl.textContent = state.koCount;
         stateLabel.textContent = "狀態：" + stageNames[stage];
         dummy.className = "dummy stage" + stage + (dummy.classList.contains("downed") ? " downed" : "");
+        renderRewards();
 
         if (ratio > 0.6) hpBar.style.background = "linear-gradient(90deg, #22c55e, #86efac)";
         else if (ratio > 0.3) hpBar.style.background = "linear-gradient(90deg, #f59e0b, #fcd34d)";
@@ -4817,7 +4939,10 @@ DASH_GAME_TEMPLATE = """<!doctype html>
       function ko() {
         state.koCount += 1;
         showFx("K.O!", true);
+        beep(160, 180, "sawtooth");
+        pulseVibe([70, 35, 90]);
         dummy.classList.add("downed");
+        saveReport("ko");
         setTimeout(() => {
           state.round += 1;
           state.hpMax = 100 + (state.round - 1) * 18;
@@ -4833,6 +4958,7 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         const now = Date.now();
         if (now - state.lastHitTs <= 1300) state.combo = Math.min(15, state.combo + 1);
         else state.combo = 1;
+        if (state.combo > state.maxCombo) state.maxCombo = state.combo;
         state.lastHitTs = now;
 
         const tool = pickTool();
@@ -4841,10 +4967,13 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         const comboMul = 1 + (state.combo - 1) * 0.09;
         const critMul = crit ? 1.6 : 1.0;
         const dmg = Math.max(1, Math.floor(base * comboMul * critMul));
+        state.toolHits[tool.id] = Number(state.toolHits[tool.id] || 0) + 1;
 
         state.hp = Math.max(0, state.hp - dmg);
         state.totalDamage += dmg;
         showFx(crit ? "爆擊!" : tool.fx, crit);
+        beep(crit ? 520 : 360, crit ? 130 : 90, crit ? "square" : "triangle");
+        pulseVibe(crit ? [24, 16, 24] : 18);
         floatDamage(dmg, crit);
         flash(tool.shake + (crit ? 0.4 : 0));
         shake(tool.shake + (crit ? 0.4 : 0));
@@ -4859,12 +4988,20 @@ DASH_GAME_TEMPLATE = """<!doctype html>
         const healPts = 10;
         state.hp = Math.min(state.hpMax, state.hp + healPts);
         showFx("呼...", false);
+        beep(240, 100, "sine");
+        pulseVibe(10);
         render();
         save();
       }
 
       function reset() {
-        state = { round: 1, hpMax: 100, hp: 100, totalDamage: 0, combo: 1, koCount: 0, selectedTool: "pillow", lastHitTs: 0 };
+        if (state.totalDamage > 0 || state.koCount > 0) {
+          saveReport("reset");
+        }
+        state = {
+          round: 1, hpMax: 100, hp: 100, totalDamage: 0, combo: 1, maxCombo: 1, koCount: 0,
+          selectedTool: "pillow", lastHitTs: 0, soundOn: true, vibeOn: true, toolHits: {}
+        };
         renderTools();
         render();
         save();
@@ -4881,12 +5018,24 @@ DASH_GAME_TEMPLATE = """<!doctype html>
           const x = JSON.parse(raw);
           state = Object.assign(state, x || {});
           if (!tools.some(t => t.id === state.selectedTool)) state.selectedTool = "pillow";
+          state.maxCombo = Math.max(1, Number(state.maxCombo || 1));
+          if (typeof state.soundOn !== "boolean") state.soundOn = true;
+          if (typeof state.vibeOn !== "boolean") state.vibeOn = true;
+          if (!state.toolHits || typeof state.toolHits !== "object") state.toolHits = {};
         } catch (_) {}
       }
 
       hitBtn.addEventListener("click", hit);
       healBtn.addEventListener("click", heal);
       resetBtn.addEventListener("click", reset);
+      soundToggle.addEventListener("change", () => {
+        state.soundOn = !!soundToggle.checked;
+        save();
+      });
+      vibeToggle.addEventListener("change", () => {
+        state.vibeOn = !!vibeToggle.checked;
+        save();
+      });
       arena.addEventListener("click", (e) => {
         if (e.target && e.target.id !== "healBtn" && e.target.id !== "resetBtn") hit();
       });
@@ -4895,6 +5044,8 @@ DASH_GAME_TEMPLATE = """<!doctype html>
       });
 
       load();
+      soundToggle.checked = !!state.soundOn;
+      vibeToggle.checked = !!state.vibeOn;
       renderTools();
       render();
     })();
@@ -4940,6 +5091,13 @@ REPAIR_TRIGGER_OPTIONS = [
     ("no_reply", "已讀不回"),
     ("schedule_change", "臨時改行程"),
     ("joke_too_far", "開玩笑過頭"),
+]
+
+GAME_REWARD_TASKS = [
+    {"ko": 1, "title": "先安撫一句", "task": "傳一句：我先抱抱你，我在。"},
+    {"ko": 3, "title": "重述在意點", "task": "用 1 句話重述對方在意的點，不反駁。"},
+    {"ko": 5, "title": "行動承諾", "task": "問：你希望我現在怎麼做？並承諾 1 個可執行行動。"},
+    {"ko": 8, "title": "和好儀式", "task": "一起到修復中心按『已修復』，結束這回合。"},
 ]
 
 DASH_LOGIN_REQUIRED_TEMPLATE = """<!doctype html>
@@ -5160,6 +5318,46 @@ def _repair_badge(streak_days: int) -> str:
     if d >= 3:
         return "先安撫再溝通 3 天"
     return "今天也在練習"
+
+
+def _game_rewards_for_ko(ko_count: int) -> list[dict]:
+    k = max(0, int(ko_count))
+    out: list[dict] = []
+    for r in GAME_REWARD_TASKS:
+        item = dict(r)
+        item["unlocked"] = bool(k >= int(r["ko"]))
+        out.append(item)
+    return out
+
+
+def _repair_process_cooldown_end_notifications(limit: int = 30) -> int:
+    now_iso = _iso_now()
+    rows = list_conflict_events_ready_for_cooldown_notify(
+        db_path=LOVE_DB_PATH,
+        now_iso=now_iso,
+        limit=limit,
+    )
+    sent = 0
+    for ev in rows:
+        event_id = int(ev.get("id") or 0)
+        if event_id <= 0:
+            continue
+        target_uid = (ev.get("target_user_id") or "").strip()
+        if not target_uid:
+            mark_conflict_cooldown_notified(db_path=LOVE_DB_PATH, event_id=event_id, notified_at_iso=now_iso)
+            continue
+        try:
+            msg = (
+                "⏰ 修復中心提醒：冷卻時間已結束\n"
+                f"事件 #{event_id} 現在可以回來處理。\n"
+                "建議順序：先安撫，再看任務卡。"
+            )
+            push_and_log(target_uid, msg, reason="REPAIR_COOLDOWN_END", target_role=None)
+            mark_conflict_cooldown_notified(db_path=LOVE_DB_PATH, event_id=event_id, notified_at_iso=now_iso)
+            sent += 1
+        except Exception as e:
+            logger.error("[REPAIR_COOLDOWN_NOTIFY][FAILED] event=%s to=%s err=%s", event_id, target_uid, str(e))
+    return sent
 
 
 def _get_couple_setting(key: str, gf_id: str | None, bf_id: str | None) -> str:
@@ -5613,12 +5811,47 @@ def dash_repair():
                     raise ValueError(reason_text)
                 if result.get("closed"):
                     status = f"事件 #{event_id} 已完成雙方修復。"
+                    try:
+                        for to_uid in (result.get("participants") or []):
+                            to_uid = (to_uid or "").strip()
+                            if not to_uid:
+                                continue
+                            push_and_log(
+                                to_uid,
+                                f"✅ 修復中心事件 #{event_id} 已完成：雙方都按了「已修復」。",
+                                reason="REPAIR_CLOSED",
+                                target_role=None,
+                            )
+                    except Exception as ne:
+                        logger.error("[REPAIR_NOTIFY][CLOSED][FAILED] event=%s err=%s", event_id, str(ne))
                 else:
                     status = f"已送出你對事件 #{event_id} 的修復確認。"
+                    try:
+                        participants = [(x or "").strip() for x in (result.get("participants") or []) if (x or "").strip()]
+                        confirmed = {(x or "").strip() for x in (result.get("confirmed_users") or []) if (x or "").strip()}
+                        pending = [p for p in participants if p not in confirmed]
+                        for to_uid in pending:
+                            push_and_log(
+                                to_uid,
+                                f"📝 修復中心提醒：對方已按事件 #{event_id} 的「已修復」，輪到你了。",
+                                reason="REPAIR_PENDING_CONFIRM",
+                                target_role=None,
+                            )
+                    except Exception as ne:
+                        logger.error("[REPAIR_NOTIFY][PENDING][FAILED] event=%s err=%s", event_id, str(ne))
         except Exception as e:
             error = f"操作失敗：{e}"
 
+    # Also scan on page requests so cooldown reminders still work even if scheduler is disabled.
+    try:
+        _repair_process_cooldown_end_notifications(limit=20)
+    except Exception:
+        pass
+
     raw_events = list_conflict_events(db_path=LOVE_DB_PATH, limit=40, user_id=uid or None)
+    event_ids = [int(ev.get("id") or 0) for ev in raw_events if int(ev.get("id") or 0) > 0]
+    trigger_map = list_conflict_triggers_map(db_path=LOVE_DB_PATH, event_ids=event_ids)
+    confirm_map = list_conflict_confirms_map(db_path=LOVE_DB_PATH, event_ids=event_ids)
     events = []
     for ev in raw_events:
         event_id = int(ev.get("id") or 0)
@@ -5629,8 +5862,8 @@ def dash_repair():
             if pid and pid not in participants:
                 participants.append(pid)
 
-        confirmed_users = list_conflict_confirmed_users(db_path=LOVE_DB_PATH, event_id=event_id)
-        trigger_rows = list_conflict_triggers_for_event(db_path=LOVE_DB_PATH, event_id=event_id)
+        confirmed_users = confirm_map.get(event_id, [])
+        trigger_rows = trigger_map.get(event_id, [])
         cooldown_left = _repair_cooldown_minutes_remaining(ev.get("cooldown_until"))
         closed = bool(ev.get("closed_at"))
         in_my_cooldown = bool(cooldown_left > 0 and uid and uid == target_uid)
@@ -5700,6 +5933,8 @@ def dash_game():
     gf_id = (base.get("gf_id") or "").strip()
     bf_id = (base.get("bf_id") or "").strip()
     allow_play = bool(uid and (uid == gf_id or uid == bf_id))
+    week_stats = get_game_week_stats(db_path=LOVE_DB_PATH, user_id=uid) if allow_play else {"plays": 0, "sum_ko": 0, "sum_damage": 0, "max_combo": 0}
+    rewards = _game_rewards_for_ko(int(week_stats.get("sum_ko") or 0))
 
     return render_template_string(
         DASH_GAME_TEMPLATE,
@@ -5707,7 +5942,47 @@ def dash_game():
         me_name=me_name,
         other_name=other_name,
         allow_play=allow_play,
+        week_stats=week_stats,
+        game_rewards_json=json.dumps(rewards, ensure_ascii=False),
     )
+
+
+@app.route("/dash/game/report", methods=["POST"])
+def dash_game_report():
+    _dash_require_api()
+    uid = _dash_current_uid()
+    base = _build_dash_base()
+    gf_id = (base.get("gf_id") or "").strip()
+    bf_id = (base.get("bf_id") or "").strip()
+    if not (uid and (uid == gf_id or uid == bf_id)):
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    body = request.get_json(silent=True) or {}
+    try:
+        total_damage = int(body.get("total_damage") or 0)
+        max_combo = int(body.get("max_combo") or 0)
+        ko_count = int(body.get("ko_count") or 0)
+        round_reached = int(body.get("round_reached") or 1)
+        tool_breakdown = body.get("tool_breakdown") or {}
+        if not isinstance(tool_breakdown, dict):
+            tool_breakdown = {}
+
+        target_uid = bf_id if uid == gf_id else gf_id
+        sid = create_game_session(
+            db_path=LOVE_DB_PATH,
+            user_id=uid,
+            target_user_id=target_uid,
+            total_damage=total_damage,
+            max_combo=max_combo,
+            ko_count=ko_count,
+            round_reached=round_reached,
+            tool_breakdown=json.dumps(tool_breakdown, ensure_ascii=False),
+        )
+        week_stats = get_game_week_stats(db_path=LOVE_DB_PATH, user_id=uid)
+        rewards = _game_rewards_for_ko(int(ko_count))
+        return jsonify({"ok": True, "session_id": sid, "week_stats": week_stats, "rewards": rewards})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/dash/tasks")
