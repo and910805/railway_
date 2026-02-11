@@ -385,6 +385,42 @@ def _record_draw(db_path: str, user_id: str, day_index: int, amount: int, drawn_
         conn.close()
 
 
+def _recover_recently_used_magic_token_user(db_path: str, token: str, grace_seconds: int = 180) -> str | None:
+    token = (token or "").strip()
+    if not token:
+        return None
+    now = int(time.time())
+    conn = _hb_conn(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT user_id, expires_at, used_at
+            FROM dashboard_magic_tokens
+            WHERE token=?
+            """,
+            (token,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            exp = int(row["expires_at"] or 0)
+            used_at = int(row["used_at"] or 0)
+        except Exception:
+            return None
+        if exp <= now:
+            return None
+        if used_at <= 0:
+            return None
+        if now - used_at > int(grace_seconds):
+            return None
+        uid = (row["user_id"] or "").strip()
+        return uid or None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def hb_make_login_url(
     *,
     base_url: str,
@@ -459,6 +495,14 @@ def register_hb_routes(
             next_path = "/hb"
 
         uid = consume_magic_token(db_path=love_db_path, token=token)
+        if not uid:
+            # LINE in-app preview/crawler may consume one-time tokens before user taps the link.
+            # Allow a short grace window for already-used-but-fresh tokens.
+            uid = _recover_recently_used_magic_token_user(
+                db_path=love_db_path,
+                token=token,
+                grace_seconds=180,
+            )
         if not uid:
             return render_template_string(
                 login_fail_template,
