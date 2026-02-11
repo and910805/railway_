@@ -2423,10 +2423,10 @@ def handle_command(user_id: str, text: str) -> str:
             return "\u76ee\u524d\u53ea\u6709\u5df2\u7d81\u5b9a\u89d2\u8272\u7684\u6210\u54e1\u53ef\u4ee5\u958b\u555f\u7d05\u5305\u6d3b\u52d5\u9801\u3002\u8acb\u5148\u5728 LINE \u7d81\u5b9a\u8eab\u4efd\u5f8c\u518d\u8a66\u3002"
         login_url = _hb_make_login_url(user_id)
         if _is_discord_id(user_id):
-            return f"\u7d05\u5305\u6d3b\u52d5\u5165\u53e3\uff08\u4e00\u6b21\u6027\u9023\u7d50\uff09\uff1a\\n{login_url}"
+            return f"\u7d05\u5305\u6d3b\u52d5\u5165\u53e3\uff08\u4e00\u6b21\u6027\u9023\u7d50\uff09\uff1a\n{login_url}"
         return (
-            "\u7d05\u5305\u6d3b\u52d5\u9801\u6e96\u5099\u597d\u4e86\uff0c\u8acb\u9ede\u9019\u500b\u4e00\u6b21\u6027\u9023\u7d50\u958b\u555f\uff1a\\n"
-            f"{login_url}\\n\\n"
+            "\u7d05\u5305\u6d3b\u52d5\u9801\u6e96\u5099\u597d\u4e86\uff0c\u8acb\u9ede\u9019\u500b\u4e00\u6b21\u6027\u9023\u7d50\u958b\u555f\uff1a\n"
+            f"{login_url}\n\n"
             "\u9023\u7d50\u6703\u5728\u77ed\u6642\u9593\u5167\u5931\u6548\uff0c\u4e14\u53ea\u80fd\u4f7f\u7528\u4e00\u6b21\u3002"
         )
 
@@ -2437,8 +2437,8 @@ def handle_command(user_id: str, text: str) -> str:
             return "\u6e2c\u8a66\u9801\uff08/test\uff09\u50c5\u9650\u7537\u53cb\u89d2\u8272\u3002"
         test_url = _hb_make_login_url(user_id, next_path="/test")
         return (
-            "\u7d05\u5305\u6e2c\u8a66\u9801\u9023\u7d50\u5982\u4e0b\uff1a\\n"
-            f"{test_url}\\n\\n"
+            "\u7d05\u5305\u6e2c\u8a66\u9801\u9023\u7d50\u5982\u4e0b\uff1a\n"
+            f"{test_url}\n\n"
             "\u9023\u7d50\u662f\u4e00\u6b21\u6027\u77ed\u6548 token\uff0c\u904e\u671f\u5f8c\u8acb\u518d\u62ff\u4e00\u6b21\u3002"
         )
 

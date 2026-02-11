@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from typing import Callable
+from urllib.parse import quote
 
 from flask import jsonify, redirect, render_template_string, request, session
 
@@ -397,7 +398,7 @@ def hb_make_login_url(
     target = (next_path or "/hb").strip()
     if target not in ("/hb", "/test"):
         target = "/hb"
-    return f"{base_url}/hb/login?t={token}&next={target}"
+    return f"{base_url}/hb/login?t={token}&next={quote(target, safe='')}"
 
 
 def hb_test_allowed(*, get_user_role: Callable[..., str | None], db_path: str, user_id: str) -> bool:
