@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 from typing import Callable
 
@@ -34,16 +35,11 @@ HB_HOME_TEMPLATE = """<!doctype html>
       --bg-2:#ffeef3;
       --card:#ffffff;
       --line:#f3c8d7;
-      --line-soft:#f8dce5;
       --text:#521b2f;
       --muted:#8a5166;
       --accent:#b71c4a;
       --ok-bg:#dcfce7;
       --ok:#0f766e;
-      --todo-bg:#fff1d7;
-      --todo:#b45309;
-      --lock-bg:#edf2f7;
-      --lock:#64748b;
       --shadow:0 10px 30px rgba(87, 26, 53, .10);
     }
     *{box-sizing:border-box}
@@ -68,36 +64,24 @@ HB_HOME_TEMPLATE = """<!doctype html>
         radial-gradient(circle at 16px 16px, rgba(183, 28, 74, .07) 0 2px, transparent 2px);
       background-size:42px 42px;
     }
-    .wrap{max-width:1020px; margin:0 auto; padding:26px 16px 46px; position:relative; z-index:1;}
+    .wrap{max-width:1020px; margin:0 auto; padding:24px 16px 42px; position:relative; z-index:1;}
     .hero{
       background:rgba(255,255,255,.76);
       border:1px solid var(--line);
       border-radius:24px;
-      padding:20px 18px;
+      padding:18px;
       box-shadow:var(--shadow);
       backdrop-filter:blur(4px);
       animation:heroIn .55s ease both;
     }
-    .chip{
-      display:inline-block;
-      border:1px solid var(--line-soft);
-      background:#fff7fb;
-      border-radius:999px;
-      padding:4px 12px;
-      color:var(--accent);
-      font-weight:700;
-      font-size:12px;
-      letter-spacing:.3px;
-    }
     .h1{
-      margin:8px 0 0;
+      margin:0;
       font-family:"Cormorant Garamond","Noto Serif TC",serif;
       font-size:42px;
       line-height:1.02;
       letter-spacing:.6px;
       color:#68223f;
     }
-    .sub{margin:10px 0 0; color:var(--muted); line-height:1.72; font-size:15px;}
     .meta{margin-top:8px; color:var(--muted); font-size:12px;}
     .grid{
       display:grid;
@@ -118,30 +102,13 @@ HB_HOME_TEMPLATE = """<!doctype html>
       transform:translateY(12px) scale(.985);
       animation:cardIn .55s ease forwards;
       animation-delay:calc(var(--d) * 70ms);
-      transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease;
-    }
-    .card::after{
-      content:"";
-      position:absolute;
-      width:120px;
-      height:120px;
-      right:-36px;
-      top:-56px;
-      border-radius:50%;
-      background:radial-gradient(circle, rgba(236,72,153,.13) 0%, rgba(236,72,153,0) 70%);
-      pointer-events:none;
-    }
-    .card:hover{
-      transform:translateY(-2px);
-      box-shadow:0 16px 34px rgba(87, 26, 53, .14);
-      border-color:#efbdd0;
     }
     .top{display:flex; justify-content:space-between; align-items:center; gap:8px;}
     .day{font-weight:800; letter-spacing:.2px;}
     .date{font-size:12px; color:var(--muted);}
     .money{font-size:28px; font-weight:800; margin-top:4px; color:#791d46;}
-    .title{margin-top:4px; color:var(--muted); min-height:22px;}
-    .title.hidden{opacity:0;}
+    .title{margin-top:4px; min-height:20px; opacity:.0;}
+    .title.show{opacity:1; color:var(--muted);}
     .pill{
       display:inline-block;
       margin-top:10px;
@@ -149,27 +116,31 @@ HB_HOME_TEMPLATE = """<!doctype html>
       border-radius:999px;
       font-size:12px;
       font-weight:800;
+      background:var(--ok-bg);
+      color:var(--ok);
     }
-    .ok{background:var(--ok-bg); color:var(--ok)}
-    .todo{background:var(--todo-bg); color:var(--todo)}
-    .lock{background:var(--lock-bg); color:var(--lock)}
     .draw{
-      display:inline-block;
       margin-top:10px;
       border:none;
       border-radius:999px;
-      padding:7px 14px;
+      width:42px;
+      height:42px;
       background:linear-gradient(90deg, #e11d48, #be123c);
       color:#fff;
-      font-size:12px;
+      font-size:20px;
       font-weight:800;
-      letter-spacing:.4px;
       box-shadow:0 8px 16px rgba(190,18,60,.25);
+      cursor:pointer;
     }
-    .draw.disabled{
+    .draw:disabled{
       background:#d6dde8;
       color:#6b7280;
       box-shadow:none;
+      cursor:not-allowed;
+    }
+    .draw.loading{
+      opacity:.65;
+      cursor:wait;
     }
     .foot{
       margin-top:16px;
@@ -179,6 +150,7 @@ HB_HOME_TEMPLATE = """<!doctype html>
       padding:14px;
       color:var(--muted);
       box-shadow:var(--shadow);
+      font-size:12px;
     }
     a{color:var(--accent);}
     @keyframes heroIn{
@@ -192,7 +164,6 @@ HB_HOME_TEMPLATE = """<!doctype html>
     @media (max-width: 720px){
       .wrap{padding:16px 12px 30px;}
       .h1{font-size:34px;}
-      .sub{font-size:14px;}
       .money{font-size:24px;}
     }
   </style>
@@ -200,7 +171,6 @@ HB_HOME_TEMPLATE = """<!doctype html>
 <body>
   <div class="wrap">
     <div class="hero">
-      <span class="chip">Red Packet</span>
       <h1 class="h1">心動九日・紅包計畫</h1>
       <div class="meta">登入身份：{{ me_name }}（{{ uid }}）｜更新時間：{{ updated_at }}</div>
     </div>
@@ -213,23 +183,51 @@ HB_HOME_TEMPLATE = """<!doctype html>
           <div class="date">{{ d.date }}</div>
         </div>
         <div class="money">{{ d.amount_text }}</div>
-        <div class="title {% if not d.show_title %}hidden{% endif %}">{{ d.title_text }}</div>
+        <div class="title {% if d.show_title %}show{% endif %}">{{ d.title_text }}</div>
         {% if d.show_result %}
-          <span class="pill ok">已破關 · 抽中 {{ d.amount_text }}</span>
+          <span class="pill">已破關 · 抽中 {{ d.amount_text }}</span>
         {% elif d.can_draw %}
-          <button class="draw">抽紅包</button>
+          <button class="draw" data-day="{{ d.day_index }}" aria-label="draw">🧧</button>
         {% else %}
-          <button class="draw disabled" disabled>鎖定</button>
+          <button class="draw" disabled aria-label="locked">🧧</button>
         {% endif %}
       </div>
       {% endfor %}
     </div>
 
     <div class="foot">
-      測試 API（需 token 先登入）：<a href="{{ ping_url }}">{{ ping_url }}</a><br/>
-      登出：<a href="/hb/logout">/hb/logout</a>
+      測試 API：<a href="{{ ping_url }}">{{ ping_url }}</a>｜登出：<a href="/hb/logout">/hb/logout</a>
     </div>
   </div>
+  <script>
+    (function () {
+      const buttons = Array.from(document.querySelectorAll(".draw[data-day]"));
+      if (!buttons.length) return;
+      async function drawOne(btn) {
+        if (!btn || btn.disabled) return;
+        btn.disabled = true;
+        btn.classList.add("loading");
+        const dayIndex = Number(btn.getAttribute("data-day") || "0");
+        try {
+          const resp = await fetch("/hb/api/draw", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({day_index: dayIndex})
+          });
+          const data = await resp.json();
+          if (resp.ok && data && data.ok) {
+            window.location.reload();
+            return;
+          }
+        } catch (e) {}
+        btn.classList.remove("loading");
+        btn.disabled = false;
+      }
+      buttons.forEach((btn) => {
+        btn.addEventListener("click", () => drawOne(btn));
+      });
+    })();
+  </script>
 </body>
 </html>
 """
@@ -294,9 +292,7 @@ HB_TEST_TEMPLATE = """<!doctype html>
       border-radius:14px;
       padding:10px;
       box-shadow:var(--shadow);
-      transition:transform .16s ease, box-shadow .16s ease;
     }
-    .item:hover{transform:translateY(-2px); box-shadow:0 14px 26px rgba(124,45,18,.14);}
     .money{font-size:24px; font-weight:900; color:#b45309; margin-top:3px;}
     a{color:var(--accent)}
     @media (max-width: 720px){
@@ -308,7 +304,7 @@ HB_TEST_TEMPLATE = """<!doctype html>
   <div class="wrap">
     <div class="hero">
       <h1 class="h1">紅包活動 /test 測試頁</h1>
-      <div class="muted">僅男友角色可開啟。此頁顯示完整金額，供你驗證流程與數字設定。</div>
+      <div class="muted">僅男友角色可開啟。此頁顯示完整金額，供你測試流程。</div>
     </div>
     <div class="card">
       身份：{{ me_name }}（{{ uid }}）<br/>
@@ -327,6 +323,65 @@ HB_TEST_TEMPLATE = """<!doctype html>
 </body>
 </html>
 """
+
+
+def _hb_conn(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=20, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _ensure_hb_tables(db_path: str) -> None:
+    conn = _hb_conn(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hb_draw_record (
+                user_id TEXT NOT NULL,
+                day_index INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                drawn_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, day_index)
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _list_drawn_days(db_path: str, user_id: str) -> set[int]:
+    conn = _hb_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT day_index FROM hb_draw_record WHERE user_id=?",
+            (user_id,),
+        ).fetchall()
+        out: set[int] = set()
+        for r in rows:
+            try:
+                out.add(int(r["day_index"]))
+            except Exception:
+                continue
+        return out
+    finally:
+        conn.close()
+
+
+def _record_draw(db_path: str, user_id: str, day_index: int, amount: int, drawn_at: str) -> bool:
+    conn = _hb_conn(db_path)
+    try:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO hb_draw_record(user_id, day_index, amount, drawn_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, int(day_index), int(amount), drawn_at),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0) > 0
+    finally:
+        conn.close()
 
 
 def hb_make_login_url(
@@ -365,7 +420,10 @@ def register_hb_routes(
     login_required_template: str,
     login_fail_template: str,
     login_forbidden_template: str,
+    push_line_messages: Callable[[str, list[dict]], object] | None = None,
 ) -> None:
+    _ensure_hb_tables(love_db_path)
+
     def _hb_session_valid() -> bool:
         try:
             exp = int(session.get("hb_exp") or 0)
@@ -385,6 +443,12 @@ def register_hb_routes(
 
     def _hb_current_uid() -> str:
         return (session.get("hb_uid") or "").strip()
+
+    def _today_event(today_iso: str) -> dict | None:
+        for d in HB_EVENT_DAYS:
+            if d["date"] == today_iso:
+                return d
+        return None
 
     @app.route("/hb/login")
     def hb_login():
@@ -443,31 +507,20 @@ def register_hb_routes(
             ), 403
 
         me_name = get_display_name(db_path=love_db_path, user_id=uid) or "使用者"
-        today = tz_now().date().isoformat()
+        now = tz_now()
+        today = now.date().isoformat()
+        drawn_days = _list_drawn_days(love_db_path, uid)
 
         cards = []
         for d in HB_EVENT_DAYS:
             day = d["date"]
-            # TODO: replace with real reward record after game APIs are ready.
-            is_cleared = False
-            if day < today:
-                status_class = "lock"
-                can_draw = False
-            elif day == today:
-                status_class = "todo"
-                can_draw = not is_cleared
-            else:
-                status_class = "lock"
-                can_draw = False
+            is_cleared = int(d["day_index"]) in drawn_days
+            can_draw = bool(day == today and not is_cleared)
 
-            amount_text = "NT$ ???"
-            if is_cleared:
-                amount_text = f"NT$ {d['amount']}"
-
+            amount_text = f"NT$ {d['amount']}" if is_cleared else "NT$ ???"
             cards.append(
                 {
                     **d,
-                    "status_class": status_class,
                     "amount_text": amount_text,
                     "show_title": is_cleared,
                     "title_text": d["title"] if is_cleared else "",
@@ -481,7 +534,7 @@ def register_hb_routes(
             bot_name=bot_name,
             uid=uid,
             me_name=me_name,
-            updated_at=tz_now().strftime("%Y-%m-%d %H:%M"),
+            updated_at=now.strftime("%Y-%m-%d %H:%M"),
             cards=cards,
             ping_url=f"{get_public_base_url()}/hb/api/ping",
         )
@@ -508,6 +561,54 @@ def register_hb_routes(
             days=HB_EVENT_DAYS,
             ping_url=f"{get_public_base_url()}/hb/api/ping",
         )
+
+    @app.route("/hb/api/draw", methods=["POST"])
+    def hb_api_draw():
+        if not _hb_session_valid():
+            return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+        uid = _hb_current_uid()
+        role = (get_user_role(db_path=love_db_path, user_id=uid) or "").strip().lower()
+        if role != "girlfriend":
+            return jsonify({"ok": False, "error": "forbidden"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        try:
+            day_index = int(payload.get("day_index") or 0)
+        except Exception:
+            day_index = 0
+        if day_index <= 0:
+            return jsonify({"ok": False, "error": "bad_day_index"}), 400
+
+        today = tz_now().date().isoformat()
+        ev = _today_event(today)
+        if not ev:
+            return jsonify({"ok": False, "error": "not_open"}), 400
+        today_index = int(ev["day_index"])
+        if day_index != today_index:
+            return jsonify({"ok": False, "error": "day_mismatch"}), 400
+
+        drawn_days = _list_drawn_days(love_db_path, uid)
+        if today_index in drawn_days:
+            return jsonify({"ok": True, "already": True, "day_index": today_index, "amount": int(ev["amount"])})
+
+        inserted = _record_draw(
+            love_db_path,
+            uid,
+            today_index,
+            int(ev["amount"]),
+            tz_now().isoformat(timespec="seconds"),
+        )
+        if not inserted:
+            return jsonify({"ok": True, "already": True, "day_index": today_index, "amount": int(ev["amount"])})
+
+        if push_line_messages is not None:
+            try:
+                push_line_messages(uid, [{"type": "text", "text": "🧧🧧🧧🧧🧧"}])
+            except Exception:
+                pass
+
+        return jsonify({"ok": True, "day_index": today_index, "amount": int(ev["amount"])})
 
     @app.route("/hb/api/ping")
     def hb_api_ping():

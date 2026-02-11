@@ -6112,6 +6112,7 @@ register_hb_routes(
     login_required_template=DASH_LOGIN_REQUIRED_TEMPLATE,
     login_fail_template=DASH_LOGIN_FAIL_TEMPLATE,
     login_forbidden_template=DASH_LOGIN_FORBIDDEN_TEMPLATE,
+    push_line_messages=line_push_messages,
 )
 
 
