@@ -2421,7 +2421,8 @@ def handle_command(user_id: str, text: str) -> str:
     if cmd in ("\u7d05\u5305\u6d3b\u52d5", "\u7d05\u5305") or cmd_l in ("hongbao", "redpack", "redpacket", "hb"):
         if not _dash_user_allowed(user_id):
             return "\u76ee\u524d\u53ea\u6709\u5df2\u7d81\u5b9a\u89d2\u8272\u7684\u6210\u54e1\u53ef\u4ee5\u958b\u555f\u7d05\u5305\u6d3b\u52d5\u9801\u3002\u8acb\u5148\u5728 LINE \u7d81\u5b9a\u8eab\u4efd\u5f8c\u518d\u8a66\u3002"
-        login_url = _hb_make_login_url(user_id)
+        is_boyfriend = _hb_test_allowed(user_id)
+        login_url = _hb_make_login_url(user_id, next_path="/test" if is_boyfriend else "/hb")
         if _is_discord_id(user_id):
             return f"\u7d05\u5305\u6d3b\u52d5\u5165\u53e3\uff08\u4e00\u6b21\u6027\u9023\u7d50\uff09\uff1a\n{login_url}"
         return (
