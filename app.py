@@ -819,6 +819,139 @@ def duo_done_today(now: datetime.datetime) -> bool:
     d = (_get_setting_global("duo_done_day") or "").strip()
     return d == now.date().isoformat()
 
+def _valentine_default_date() -> str:
+    now = _tz_now().date()
+    year = now.year
+    if (now.month, now.day) > (2, 14):
+        year += 1
+    return f"{year}-02-14"
+
+def _valentine_default_messages() -> list[str]:
+    return [
+        "你的白馬公子馬上就要來接你了，你期不期待？",
+        "今天的行程很簡單：把你放在我心上最中間。",
+        "等等見到你，我想先給你一個很久很久的抱抱。",
+        "謝謝你一直在，我每天都比昨天更喜歡你。",
+        "我想把今天每個小瞬間，都變成你會笑的回憶。",
+        "你在的地方，連空氣都變得溫柔。",
+        "今天我只做一件大事：好好愛你。",
+        "如果你累了就靠過來，我會一直在。",
+        "我最驕傲的事，是可以光明正大牽你的手。",
+        "你不是剛好出現，你是我每天都想選的人。",
+        "我喜歡你，不只今天，是每一個平凡日子。",
+        "今晚想陪你慢慢走，把心事都交給月亮。",
+        "謝謝你讓我學會，愛可以這麼踏實又溫暖。",
+        "和你在一起，連沉默都很有安全感。",
+        "希望你今天被愛包圍，也被我偏愛。",
+        "情人節快結束了，但我對你的喜歡還在加班。",
+        "今天最後一則：謝謝你成為我的女朋友，晚安，我愛你。",
+    ]
+
+def _valentine_messages_default_text() -> str:
+    return "\n".join(_valentine_default_messages())
+
+def _valentine_messages_from_text(raw: str) -> list[str]:
+    lines = [str(x).strip() for x in (raw or "").splitlines()]
+    out = [x for x in lines if x]
+    if out:
+        return out
+    return _valentine_default_messages()
+
+def _valentine_messages_text_setting() -> str:
+    raw = _get_setting_global("valentine_messages")
+    if raw is None or not str(raw).strip():
+        return _valentine_messages_default_text()
+    return str(raw).strip()
+
+def _valentine_enabled() -> bool:
+    return _get_bool_setting_global("valentine_enabled", True)
+
+def _valentine_target_role() -> str:
+    role = (_get_str_setting_global("valentine_target_role", "girlfriend") or "").strip().lower()
+    return role if role in ("girlfriend", "boyfriend") else "girlfriend"
+
+def _valentine_scheduled_date() -> datetime.date:
+    raw = (_get_str_setting_global("valentine_date", _valentine_default_date()) or "").strip()
+    try:
+        return datetime.date.fromisoformat(raw)
+    except Exception:
+        try:
+            return datetime.date.fromisoformat(_valentine_default_date())
+        except Exception:
+            return _tz_now().date()
+
+def _valentine_sent_keys() -> set[str]:
+    raw = (_get_setting_global("valentine_sent_keys") or "").strip()
+    if not raw:
+        return set()
+    try:
+        arr = json.loads(raw)
+        if not isinstance(arr, list):
+            return set()
+        return {str(x) for x in arr if str(x).strip()}
+    except Exception:
+        return set()
+
+def _valentine_mark_sent(key: str):
+    keys = _valentine_sent_keys()
+    keys.add(key)
+    arr = sorted(keys)
+    set_setting(
+        db_path=LOVE_DB_PATH,
+        user_id=SETTINGS_GLOBAL_USER_ID,
+        key="valentine_sent_keys",
+        value=json.dumps(arr, ensure_ascii=False),
+    )
+    try:
+        g._global_settings_map = None
+    except Exception:
+        pass
+
+def _valentine_slot_index(now: datetime.datetime, base_date: datetime.date, message_count: int) -> int | None:
+    if message_count <= 0:
+        return None
+    if now.date() == base_date and now.hour >= 8:
+        idx = now.hour - 8
+        if idx < message_count:
+            return idx
+    # treat "24:00" as next day 00:00 (only when there are extra messages)
+    if now.date() == (base_date + datetime.timedelta(days=1)) and now.hour == 0:
+        idx = 16
+        if idx < message_count:
+            return idx
+    return None
+
+def scheduled_valentine_surprise():
+    try:
+        if not _valentine_enabled():
+            return
+        now = _tz_now()
+        if now.minute != 0:
+            return
+        base_date = _valentine_scheduled_date()
+        msgs = _valentine_messages_from_text(_valentine_messages_text_setting())
+        idx = _valentine_slot_index(now, base_date, len(msgs))
+        if idx is None:
+            return
+        send_key = f"{base_date.isoformat()}#{idx}"
+        if send_key in _valentine_sent_keys():
+            return
+        msg = msgs[idx].strip()
+        if not msg:
+            _valentine_mark_sent(send_key)
+            return
+        role = _valentine_target_role()
+        targets = [x for x in _get_role_ids(role) if (x or "").strip()]
+        if not targets:
+            print(f"[SCHED][VALENTINE] no targets for role={role}", flush=True)
+            return
+        for uid in sorted(set(targets)):
+            push_and_log(uid, msg, reason="VALENTINE_SURPRISE", target_role=role)
+        _valentine_mark_sent(send_key)
+        print(f"[SCHED][VALENTINE] pushed slot={idx} role={role}", flush=True)
+    except Exception as e:
+        print("[SCHED][VALENTINE] error:", e, flush=True)
+
 def _is_pill_confirm_text(text: str) -> bool:
     t = (text or "").strip()
     if not t:
@@ -3030,6 +3163,19 @@ def _scheduler_apply_settings(sched: BackgroundScheduler):
     except Exception as e:
         print("[SCHED][REPAIR] add_job error:", e, flush=True)
 
+    # ===== valentine surprise scan (every minute; gated by settings/date) =====
+    _scheduler_remove_if_exists(sched, "valentine_surprise")
+    try:
+        sched.add_job(
+            scheduled_valentine_surprise,
+            "interval",
+            minutes=1,
+            id="valentine_surprise",
+            replace_existing=True,
+        )
+    except Exception as e:
+        print("[SCHED][VALENTINE] add_job error:", e, flush=True)
+
 
 def refresh_scheduler_jobs():
     if not _scheduler:
@@ -4241,6 +4387,35 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
           <label class="block md:col-span-2">
             <div class="text-sm text-slate-600">安靜時段（HH:MM-HH:MM，留空=不啟用）</div>
             <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="med_pill_quiet_hours" value="{{ med_pill_quiet_hours }}" placeholder="00:00-07:00" />
+          </label>
+        </div>
+      </div>
+
+      <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
+        <div class="text-lg font-semibold">情人節驚喜排程</div>
+        <div class="mt-1 text-sm text-slate-600">2/14 從早上 08:00 開始，每小時發一則。可自訂對象與訊息內容。</div>
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label class="flex items-center gap-2">
+            <input type="checkbox" name="valentine_enabled" value="1" {% if valentine_enabled %}checked{% endif %} />
+            <span>啟用情人節驚喜</span>
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">驚喜日期（YYYY-MM-DD）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="valentine_date" value="{{ valentine_date }}" placeholder="2026-02-14" />
+          </label>
+
+          <label class="block">
+            <div class="text-sm text-slate-600">發送對象</div>
+            <select class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="valentine_target_role">
+              <option value="girlfriend" {% if valentine_target_role == "girlfriend" %}selected{% endif %}>Girlfriend</option>
+              <option value="boyfriend" {% if valentine_target_role == "boyfriend" %}selected{% endif %}>Boyfriend</option>
+            </select>
+          </label>
+
+          <label class="block md:col-span-2">
+            <div class="text-sm text-slate-600">每行一則（第 1 行 = 08:00，第 2 行 = 09:00 ...；若有第 17 行，會在隔天 00:00 發送）</div>
+            <textarea class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="valentine_messages" rows="12" placeholder="每行一則訊息">{{ valentine_messages }}</textarea>
           </label>
         </div>
       </div>
@@ -5944,6 +6119,12 @@ def dash_settings():
             _set("role_label_girlfriend", (request.form.get("role_label_girlfriend") or "").strip())
             _set("role_label_boyfriend", (request.form.get("role_label_boyfriend") or "").strip())
 
+            # valentine surprise
+            _set("valentine_enabled", "1" if request.form.get("valentine_enabled") else "0")
+            _set("valentine_target_role", (request.form.get("valentine_target_role") or "girlfriend").strip().lower())
+            _set("valentine_date", (request.form.get("valentine_date") or _valentine_default_date()).strip())
+            _set("valentine_messages", (request.form.get("valentine_messages") or "").strip())
+
             refresh_scheduler_jobs()
             status = "已儲存並套用。"
         except Exception as e:
@@ -5996,6 +6177,10 @@ def dash_settings():
 
         "role_label_girlfriend": gf_label,
         "role_label_boyfriend": bf_label,
+        "valentine_enabled": _valentine_enabled(),
+        "valentine_target_role": _valentine_target_role(),
+        "valentine_date": _valentine_scheduled_date().isoformat(),
+        "valentine_messages": _valentine_messages_text_setting(),
     }
     return render_template_string(DASH_SETTINGS_TEMPLATE, **data)
 
