@@ -140,7 +140,8 @@ HB_HOME_TEMPLATE = """<!doctype html>
     .day{font-weight:800; letter-spacing:.2px;}
     .date{font-size:12px; color:var(--muted);}
     .money{font-size:28px; font-weight:800; margin-top:4px; color:#791d46;}
-    .title{margin-top:4px; color:var(--muted);}
+    .title{margin-top:4px; color:var(--muted); min-height:22px;}
+    .title.hidden{opacity:0;}
     .pill{
       display:inline-block;
       margin-top:10px;
@@ -152,6 +153,24 @@ HB_HOME_TEMPLATE = """<!doctype html>
     .ok{background:var(--ok-bg); color:var(--ok)}
     .todo{background:var(--todo-bg); color:var(--todo)}
     .lock{background:var(--lock-bg); color:var(--lock)}
+    .draw{
+      display:inline-block;
+      margin-top:10px;
+      border:none;
+      border-radius:999px;
+      padding:7px 14px;
+      background:linear-gradient(90deg, #e11d48, #be123c);
+      color:#fff;
+      font-size:12px;
+      font-weight:800;
+      letter-spacing:.4px;
+      box-shadow:0 8px 16px rgba(190,18,60,.25);
+    }
+    .draw.disabled{
+      background:#d6dde8;
+      color:#6b7280;
+      box-shadow:none;
+    }
     .foot{
       margin-top:16px;
       background:#fff;
@@ -181,10 +200,8 @@ HB_HOME_TEMPLATE = """<!doctype html>
 <body>
   <div class="wrap">
     <div class="hero">
-      <span class="chip">Heartbeat Week</span>
+      <span class="chip">Red Packet</span>
       <h1 class="h1">心動九日・紅包計畫</h1>
-      <div class="sub">每天一個小關卡、一點小浪漫。前五日會在 Day 5 合成 1314，最後以 520 與 888 收尾。</div>
-      <div class="sub">從 LINE 一次性連結進入，外部無 token 無法開啟。此頁路徑為 <code>/hb</code>。</div>
       <div class="meta">登入身份：{{ me_name }}（{{ uid }}）｜更新時間：{{ updated_at }}</div>
     </div>
 
@@ -196,8 +213,14 @@ HB_HOME_TEMPLATE = """<!doctype html>
           <div class="date">{{ d.date }}</div>
         </div>
         <div class="money">{{ d.amount_text }}</div>
-        <div class="title">{{ d.title }}</div>
-        <span class="pill {{ d.status_class }}">{{ d.status_text }}</span>
+        <div class="title {% if not d.show_title %}hidden{% endif %}">{{ d.title_text }}</div>
+        {% if d.show_result %}
+          <span class="pill ok">已破關 · 抽中 {{ d.amount_text }}</span>
+        {% elif d.can_draw %}
+          <button class="draw">抽紅包</button>
+        {% else %}
+          <button class="draw disabled" disabled>鎖定</button>
+        {% endif %}
       </div>
       {% endfor %}
     </div>
@@ -411,25 +434,47 @@ def register_hb_routes(
             return resp
 
         uid = _hb_current_uid()
+        role = (get_user_role(db_path=love_db_path, user_id=uid) or "").strip().lower()
+        if role != "girlfriend":
+            return render_template_string(
+                login_forbidden_template,
+                bot_name=bot_name,
+                docs_url=f"{get_public_base_url()}/docs",
+            ), 403
+
         me_name = get_display_name(db_path=love_db_path, user_id=uid) or "使用者"
         today = tz_now().date().isoformat()
 
         cards = []
         for d in HB_EVENT_DAYS:
             day = d["date"]
+            # TODO: replace with real reward record after game APIs are ready.
+            is_cleared = False
             if day < today:
-                status_text = "已過期（不補領）"
                 status_class = "lock"
+                can_draw = False
             elif day == today:
-                status_text = "今日可挑戰"
                 status_class = "todo"
+                can_draw = not is_cleared
             else:
-                status_text = "尚未解鎖"
                 status_class = "lock"
+                can_draw = False
+
             amount_text = "NT$ ???"
-            if status_text == "已領取":
+            if is_cleared:
                 amount_text = f"NT$ {d['amount']}"
-            cards.append({**d, "status_text": status_text, "status_class": status_class, "amount_text": amount_text})
+
+            cards.append(
+                {
+                    **d,
+                    "status_class": status_class,
+                    "amount_text": amount_text,
+                    "show_title": is_cleared,
+                    "title_text": d["title"] if is_cleared else "",
+                    "show_result": is_cleared,
+                    "can_draw": can_draw,
+                }
+            )
 
         return render_template_string(
             HB_HOME_TEMPLATE,
