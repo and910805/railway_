@@ -2413,6 +2413,18 @@ def handle_command(user_id: str, text: str) -> str:
         ]
 
 
+    if cmd in ("紅包活動", "紅包") or cmd_l in ("hongbao", "redpack", "redpacket", "hb"):
+        if not _dash_user_allowed(user_id):
+            return "目前只有已綁定角色的成員可以開啟紅包活動頁。請先在 LINE 綁定身份後再試。"
+        login_url = _hb_make_login_url(user_id)
+        if _is_discord_id(user_id):
+            return f"紅包活動測試入口（一次性連結）：\n{login_url}"
+        return (
+            "紅包活動頁準備好了，請點這個一次性連結開啟：\n"
+            f"{login_url}\n\n"
+            "連結會在短時間內失效，且只能使用一次。"
+        )
+
     # identity / push
     if cmd == "我是臭寶":
         set_role(db_path=LOVE_DB_PATH, user_id=user_id, role="girlfriend")
@@ -5734,6 +5746,39 @@ def _dash_make_login_url(for_user_id: str) -> str:
     return f"{base_url}/dash/login?t={token}"
 
 
+def _hb_session_valid() -> bool:
+    try:
+        exp = int(session.get("hb_exp") or 0)
+    except Exception:
+        exp = 0
+    uid = (session.get("hb_uid") or "").strip()
+    return bool(uid) and int(time.time()) < exp
+
+
+def _hb_make_login_url(for_user_id: str) -> str:
+    base_url = get_public_base_url()
+    token = create_dashboard_magic_token(
+        db_path=LOVE_DB_PATH,
+        user_id=for_user_id,
+        ttl_seconds=DASH_MAGIC_TOKEN_TTL_SECONDS,
+    )
+    return f"{base_url}/hb/login?t={token}"
+
+
+def _hb_require_page():
+    if _hb_session_valid():
+        return None
+    return render_template_string(
+        DASH_LOGIN_REQUIRED_TEMPLATE,
+        bot_name=BOT_NAME,
+        docs_url=f"{get_public_base_url()}/docs",
+    )
+
+
+def _hb_current_uid() -> str:
+    return (session.get("hb_uid") or "").strip()
+
+
 def _dash_require_page():
     if _dashboard_session_valid():
         return None
@@ -6048,6 +6093,172 @@ def _build_dashboard_data() -> dict:
         "warning": warning,
     }
 
+
+
+HB_EVENT_DAYS = [
+    {"date": "2026-02-14", "day_index": 1, "amount": 214, "title": "情人節開場", "icon": "❤️"},
+    {"date": "2026-02-15", "day_index": 2, "amount": 222, "title": "成雙成對", "icon": "💕"},
+    {"date": "2026-02-16", "day_index": 3, "amount": 256, "title": "工程師彩蛋", "icon": "💻"},
+    {"date": "2026-02-17", "day_index": 4, "amount": 288, "title": "發發日", "icon": "🧧"},
+    {"date": "2026-02-18", "day_index": 5, "amount": 299, "title": "愛久久", "icon": "✨"},
+    {"date": "2026-02-19", "day_index": 6, "amount": 333, "title": "順順順", "icon": "🌹"},
+    {"date": "2026-02-20", "day_index": 7, "amount": 365, "title": "天天愛", "icon": "💞"},
+    {"date": "2026-02-21", "day_index": 8, "amount": 399, "title": "久久久久久", "icon": "🎵"},
+    {"date": "2026-02-22", "day_index": 9, "amount": 520, "title": "我愛你", "icon": "🥰"},
+]
+
+
+HB_HOME_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }} - 心動九日紅包</title>
+  <style>
+    :root{
+      --bg1:#fff2f5; --bg2:#ffe6ee; --card:#ffffff;
+      --line:#f0c6d4; --text:#5d1734; --muted:#8f4d6a;
+      --ok:#0f766e; --todo:#b45309; --lock:#64748b;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; color:var(--text);
+      font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+      background:
+        radial-gradient(1200px 500px at 10% -10%, #ffd8e6 0%, transparent 60%),
+        radial-gradient(900px 420px at 90% 0%, #ffe3ec 0%, transparent 62%),
+        linear-gradient(180deg, var(--bg1) 0%, var(--bg2) 100%);
+      min-height:100vh;
+    }
+    .wrap{max-width:980px; margin:0 auto; padding:20px 14px 40px;}
+    .head{background:rgba(255,255,255,.65); border:1px solid var(--line); border-radius:20px; padding:16px; backdrop-filter: blur(4px);}
+    .h1{font-size:26px; font-weight:900; margin:0}
+    .sub{margin-top:6px; color:var(--muted); line-height:1.6}
+    .meta{margin-top:8px; color:var(--muted); font-size:13px}
+    .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-top:16px}
+    .card{background:var(--card); border:1px solid var(--line); border-radius:16px; padding:14px; box-shadow:0 8px 24px rgba(93,23,52,.08)}
+    .top{display:flex; justify-content:space-between; align-items:center}
+    .day{font-weight:800}
+    .money{font-size:22px; font-weight:900; margin-top:4px}
+    .title{margin-top:6px; color:var(--muted)}
+    .pill{display:inline-block; margin-top:10px; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800}
+    .ok{background:#dcfce7; color:var(--ok)}
+    .todo{background:#ffedd5; color:var(--todo)}
+    .lock{background:#e2e8f0; color:var(--lock)}
+    .foot{margin-top:16px; background:#fff; border:1px solid var(--line); border-radius:16px; padding:14px; color:var(--muted)}
+    a{color:#be185d}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <h1 class="h1">心動九日・紅包計畫</h1>
+      <div class="sub">從 LINE 一次性連結進入，外部無 token 無法開啟。這頁是同服務獨立路徑：<code>/hb</code>。</div>
+      <div class="meta">登入身份：{{ me_name }}（{{ uid }}）｜更新時間：{{ updated_at }}</div>
+    </div>
+
+    <div class="grid">
+      {% for d in cards %}
+      <div class="card">
+        <div class="top">
+          <div class="day">Day {{ d.day_index }} {{ d.icon }}</div>
+          <div>{{ d.date }}</div>
+        </div>
+        <div class="money">NT$ {{ d.amount }}</div>
+        <div class="title">{{ d.title }}</div>
+        <span class="pill {{ d.status_class }}">{{ d.status_text }}</span>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="foot">
+      測試 API（需 token 先登入）：<a href="{{ ping_url }}">{{ ping_url }}</a><br/>
+      登出：<a href="/hb/logout">/hb/logout</a>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+@app.route("/hb/login")
+def hb_login():
+    token = (request.args.get("t") or "").strip()
+    uid = consume_dashboard_magic_token(db_path=LOVE_DB_PATH, token=token)
+    if not uid:
+        return render_template_string(
+            DASH_LOGIN_FAIL_TEMPLATE,
+            bot_name=BOT_NAME,
+            docs_url=f"{get_public_base_url()}/docs",
+        ), 401
+
+    if not _dash_user_allowed(uid):
+        return render_template_string(
+            DASH_LOGIN_FORBIDDEN_TEMPLATE,
+            bot_name=BOT_NAME,
+            docs_url=f"{get_public_base_url()}/docs",
+        ), 403
+
+    session["hb_uid"] = uid
+    session["hb_exp"] = int(time.time()) + DASH_SESSION_TTL_SECONDS
+    session["hb_at"] = int(time.time())
+    return redirect("/hb")
+
+
+@app.route("/hb/logout")
+def hb_logout():
+    session.pop("hb_uid", None)
+    session.pop("hb_exp", None)
+    session.pop("hb_at", None)
+    return redirect("/hb")
+
+
+@app.route("/hb")
+def hb_home():
+    resp = _hb_require_page()
+    if resp is not None:
+        return resp
+
+    uid = _hb_current_uid()
+    me_name = get_display_name(db_path=LOVE_DB_PATH, user_id=uid)
+    today = _tz_now().date().isoformat()
+    cards = []
+    for d in HB_EVENT_DAYS:
+        day = d["date"]
+        if day < today:
+            status_text = "已過期（不補領）"
+            status_class = "lock"
+        elif day == today:
+            status_text = "今日可挑戰"
+            status_class = "todo"
+        else:
+            status_text = "尚未解鎖"
+            status_class = "lock"
+        cards.append({**d, "status_text": status_text, "status_class": status_class})
+
+    return render_template_string(
+        HB_HOME_TEMPLATE,
+        bot_name=BOT_NAME,
+        uid=uid,
+        me_name=me_name or "使用者",
+        updated_at=_tz_now().strftime("%Y-%m-%d %H:%M"),
+        cards=cards,
+        ping_url=f"{get_public_base_url()}/hb/api/ping",
+    )
+
+
+@app.route("/hb/api/ping")
+def hb_api_ping():
+    if not _hb_session_valid():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return jsonify(
+        {
+            "ok": True,
+            "uid": _hb_current_uid(),
+            "now": _tz_now().isoformat(timespec="seconds"),
+            "path": "/hb/api/ping",
+        }
+    )
 
 
 @app.route("/dash/login")
