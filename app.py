@@ -5,6 +5,7 @@ import base64
 import hashlib
 import datetime
 import time
+import sqlite3
 import asyncio
 import threading
 import mimetypes
@@ -91,6 +92,7 @@ from db_love import (
 
 from weather_client import fetch_today_weather_metrics
 from hb_feature import (
+    HB_EVENT_DAYS,
     hb_make_login_url as hb_feature_make_login_url,
     hb_test_allowed as hb_feature_test_allowed,
     register_hb_routes,
@@ -2245,6 +2247,160 @@ def build_dashboard_login_flex(base_url: str, login_url: str) -> dict:
         },
     }
 
+
+def _hb_event_of_day(day_iso: str) -> dict | None:
+    for d in HB_EVENT_DAYS:
+        if str(d.get("date") or "") == day_iso:
+            return d
+    return None
+
+
+def _hb_draw_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(LOVE_DB_PATH, timeout=20, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _hb_ensure_draw_table() -> None:
+    conn = _hb_draw_conn()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hb_draw_record (
+                user_id TEXT NOT NULL,
+                day_index INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                drawn_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, day_index)
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _hb_query_draw_amount(user_id: str, day_index: int) -> int | None:
+    _hb_ensure_draw_table()
+    conn = _hb_draw_conn()
+    try:
+        row = conn.execute(
+            "SELECT amount FROM hb_draw_record WHERE user_id=? AND day_index=?",
+            (user_id, int(day_index)),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return int(row["amount"])
+        except Exception:
+            return None
+    finally:
+        conn.close()
+
+
+def _hb_draw_once_for_today(user_id: str) -> dict:
+    now = _tz_now()
+    today_iso = now.date().isoformat()
+    ev = _hb_event_of_day(today_iso)
+    if not ev:
+        start = HB_EVENT_DAYS[0]["date"] if HB_EVENT_DAYS else ""
+        end = HB_EVENT_DAYS[-1]["date"] if HB_EVENT_DAYS else ""
+        return {"ok": False, "error": "not_open", "start_date": start, "end_date": end}
+
+    day_index = int(ev["day_index"])
+    amount = int(ev["amount"])
+    title = str(ev.get("title") or "")
+
+    _hb_ensure_draw_table()
+    conn = _hb_draw_conn()
+    try:
+        row = conn.execute(
+            "SELECT amount FROM hb_draw_record WHERE user_id=? AND day_index=?",
+            (user_id, day_index),
+        ).fetchone()
+        if row:
+            fixed = int(row["amount"] or amount)
+            return {
+                "ok": True,
+                "already": True,
+                "day_index": day_index,
+                "amount": fixed,
+                "title": title,
+                "date": today_iso,
+            }
+
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO hb_draw_record(user_id, day_index, amount, drawn_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, day_index, amount, now.isoformat(timespec="seconds")),
+        )
+        conn.commit()
+        inserted = int(cur.rowcount or 0) > 0
+        return {
+            "ok": True,
+            "already": (not inserted),
+            "day_index": day_index,
+            "amount": amount,
+            "title": title,
+            "date": today_iso,
+        }
+    finally:
+        conn.close()
+
+
+def build_hb_draw_flex(base_url: str, user_id: str) -> dict:
+    role = (get_user_role(db_path=LOVE_DB_PATH, user_id=user_id) or "").strip().lower()
+    now = _tz_now()
+    today_iso = now.date().isoformat()
+    ev = _hb_event_of_day(today_iso)
+
+    start_date = HB_EVENT_DAYS[0]["date"] if HB_EVENT_DAYS else "-"
+    end_date = HB_EVENT_DAYS[-1]["date"] if HB_EVENT_DAYS else "-"
+    status_text = f"活動期間：{start_date} ~ {end_date}"
+    if ev:
+        status_text = f"今天是 Day {int(ev['day_index'])}（{today_iso}）"
+
+    if role != "girlfriend":
+        hint_text = "本活動目前開放臭寶（girlfriend）抽取；你可以到遊戲大廳看其他遊戲。"
+        main_button = {"type": "message", "label": "查看規則", "text": "紅包規則"}
+    else:
+        if ev:
+            drawn_amount = _hb_query_draw_amount(user_id, int(ev["day_index"]))
+            if drawn_amount is None:
+                hint_text = "今天可以抽一次，按下按鈕就會開出今日紅包。"
+                main_button = {"type": "message", "label": "立即抽紅包", "text": "抽紅包"}
+            else:
+                hint_text = f"今天已抽過：NT$ {drawn_amount}。明天再來。"
+                main_button = {"type": "message", "label": "查看今日結果", "text": "今日紅包"}
+        else:
+            hint_text = "今天不在活動期間，先到遊戲大廳逛逛。"
+            main_button = {"type": "message", "label": "查看規則", "text": "紅包規則"}
+
+    footer_buttons = [
+        {"type": "button", "style": "primary", "action": main_button},
+    ]
+    if base_url:
+        footer_buttons.append(
+            {"type": "button", "style": "secondary", "action": {"type": "uri", "label": "遊戲大廳", "uri": f"{base_url}/games"}}
+        )
+
+    return {
+        "type": "bubble",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
+            "contents": [
+                {"type": "text", "text": "心動九日紅包", "weight": "bold", "size": "xl"},
+                {"type": "text", "text": status_text, "size": "sm", "color": "#666666", "wrap": True},
+                {"type": "text", "text": hint_text, "size": "sm", "wrap": True},
+            ],
+        },
+        "footer": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": footer_buttons},
+    }
+
 def _cmd(text: str) -> tuple[str, str]:
     """
     支援：
@@ -2398,6 +2554,12 @@ def handle_command(user_id: str, text: str) -> str:
         base_url = get_public_base_url()
         return help_quick_text(base_url)
 
+    if cmd in ("遊戲", "遊戲大廳") or cmd_l in ("games", "gamehub"):
+        base_url = get_public_base_url()
+        if base_url:
+            return f"遊戲大廳：{base_url}/games"
+        return "遊戲大廳路徑：/games（目前 PUBLIC_BASE_URL 未設定）"
+
     if cmd in ("儀表板", "面板") or cmd_l in ("dashboard", "dash"):
         base_url = get_public_base_url()
         if not _dash_user_allowed(user_id):
@@ -2421,27 +2583,64 @@ def handle_command(user_id: str, text: str) -> str:
     if cmd in ("\u7d05\u5305\u6d3b\u52d5", "\u7d05\u5305") or cmd_l in ("hongbao", "redpack", "redpacket", "hb"):
         if not _dash_user_allowed(user_id):
             return "\u76ee\u524d\u53ea\u6709\u5df2\u7d81\u5b9a\u89d2\u8272\u7684\u6210\u54e1\u53ef\u4ee5\u958b\u555f\u7d05\u5305\u6d3b\u52d5\u9801\u3002\u8acb\u5148\u5728 LINE \u7d81\u5b9a\u8eab\u4efd\u5f8c\u518d\u8a66\u3002"
-        is_boyfriend = _hb_test_allowed(user_id)
-        login_url = _hb_make_login_url(user_id, next_path="/test" if is_boyfriend else "/hb")
+        base_url = get_public_base_url()
         if _is_discord_id(user_id):
-            return f"\u7d05\u5305\u6d3b\u52d5\u5165\u53e3\uff08\u4e00\u6b21\u6027\u9023\u7d50\uff09\uff1a\n{login_url}"
-        return (
-            "\u7d05\u5305\u6d3b\u52d5\u9801\u6e96\u5099\u597d\u4e86\uff0c\u8acb\u9ede\u9019\u500b\u4e00\u6b21\u6027\u9023\u7d50\u958b\u555f\uff1a\n"
-            f"{login_url}\n\n"
-            "\u9023\u7d50\u6703\u5728\u77ed\u6642\u9593\u5167\u5931\u6548\uff0c\u4e14\u53ea\u80fd\u4f7f\u7528\u4e00\u6b21\u3002"
-        )
+            return "紅包抽取改在 LINE 內完成。請直接輸入：抽紅包"
+        return [
+            {
+                "type": "flex",
+                "altText": f"{BOT_NAME} 紅包活動",
+                "contents": build_hb_draw_flex(base_url, user_id),
+            }
+        ]
+
+    if cmd in ("抽紅包", "開紅包") or cmd_l in ("drawhb", "drawredpack"):
+        if not _dash_user_allowed(user_id):
+            return "目前只有已綁定角色的成員可以抽紅包。請先在 LINE 綁定身份後再試。"
+        role = (get_user_role(db_path=LOVE_DB_PATH, user_id=user_id) or "").strip().lower()
+        if role != "girlfriend":
+            return "目前僅臭寶（girlfriend）可抽紅包。"
+
+        result = _hb_draw_once_for_today(user_id)
+        if not result.get("ok"):
+            if result.get("error") == "not_open":
+                return (
+                    "今天不在紅包活動期間。\n"
+                    f"活動日期：{result.get('start_date', '-')} ~ {result.get('end_date', '-')}\n"
+                    "你可以先輸入「紅包規則」查看完整日程。"
+                )
+            return "紅包抽取失敗，請稍後再試。"
+
+        amount = int(result.get("amount") or 0)
+        day_index = int(result.get("day_index") or 0)
+        title = str(result.get("title") or "")
+        date_text = str(result.get("date") or "")
+        if result.get("already"):
+            return f"你今天已經抽過囉（{date_text} Day {day_index}）\n今日固定紅包：NT$ {amount}｜{title}"
+        return [
+            {"type": "text", "text": "🧧 紅包打開中..."},
+            {"type": "text", "text": f"恭喜抽中 NT$ {amount}\n{title}\n（{date_text}｜Day {day_index}）"},
+        ]
+
+    if cmd in ("今日紅包", "紅包規則"):
+        now = _tz_now().date().isoformat()
+        ev = _hb_event_of_day(now)
+        if cmd == "今日紅包":
+            if not ev:
+                start = HB_EVENT_DAYS[0]["date"] if HB_EVENT_DAYS else "-"
+                end = HB_EVENT_DAYS[-1]["date"] if HB_EVENT_DAYS else "-"
+                return f"今天不在活動期間。\n活動日期：{start} ~ {end}"
+            amount = _hb_query_draw_amount(user_id, int(ev["day_index"]))
+            if amount is None:
+                return f"今天是 Day {int(ev['day_index'])}（{now}），尚未抽取。\n輸入「抽紅包」即可開獎。"
+            return f"今天是 Day {int(ev['day_index'])}（{now}）\n固定紅包：NT$ {int(amount)}｜{ev.get('title') or ''}"
+        base_url = get_public_base_url()
+        if base_url:
+            return f"紅包規則頁：{base_url}/games/hb"
+        return "紅包規則：活動共 9 天，每日固定金額，請輸入「抽紅包」領取。"
 
     if text.strip() in ("\u7d05\u5305\u6e2c\u8a66", "/test") or cmd_l in ("hbtest", "redtest"):
-        if not _dash_user_allowed(user_id):
-            return "\u76ee\u524d\u53ea\u6709\u5df2\u7d81\u5b9a\u89d2\u8272\u7684\u6210\u54e1\u53ef\u4ee5\u958b\u555f\u7d05\u5305\u6d3b\u52d5\u9801\u3002\u8acb\u5148\u5728 LINE \u7d81\u5b9a\u8eab\u4efd\u5f8c\u518d\u8a66\u3002"
-        if not _hb_test_allowed(user_id):
-            return "\u6e2c\u8a66\u9801\uff08/test\uff09\u50c5\u9650\u7537\u53cb\u89d2\u8272\u3002"
-        test_url = _hb_make_login_url(user_id, next_path="/test")
-        return (
-            "\u7d05\u5305\u6e2c\u8a66\u9801\u9023\u7d50\u5982\u4e0b\uff1a\n"
-            f"{test_url}\n\n"
-            "\u9023\u7d50\u662f\u4e00\u6b21\u6027\u77ed\u6548 token\uff0c\u904e\u671f\u5f8c\u8acb\u518d\u62ff\u4e00\u6b21\u3002"
-        )
+        return "紅包改為 LINE 內抽取，不再使用 /test。請輸入「紅包」或「抽紅包」。"
 
     # identity / push
     if cmd == "我是臭寶":
@@ -3245,6 +3444,249 @@ if ENABLE_DISCORD_BOT:
         print("[DISCORD] start_discord_bot error:", e, flush=True)
 
 
+GAMES_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }}｜遊戲大廳</title>
+  <style>
+    body{margin:0;background:#f8fafc;color:#0f172a;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+    .wrap{max-width:920px;margin:0 auto;padding:22px 16px 40px;}
+    .card{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px;margin-top:12px;}
+    .title{font-size:28px;font-weight:800;margin:0;}
+    .muted{color:#64748b;}
+    .btn{display:inline-block;margin-top:10px;padding:8px 12px;border-radius:10px;text-decoration:none;border:1px solid #cbd5e1;background:#fff;}
+    .btn.primary{background:#0f172a;border-color:#0f172a;color:#fff;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 class="title">遊戲大廳</h1>
+    <p class="muted">每個遊戲分開獨立頁面。你指定的 5 款已先上線。</p>
+    <div class="card"><h2>🧧 心動九日紅包</h2><p>抽取入口在 LINE 對話內，網頁僅規則。</p><a class="btn primary" href="/games/hb">查看規則</a></div>
+    <div class="card"><h2>💓 心跳長按</h2><p>按住按鈕，盡量貼近目標秒數。</p><a class="btn" href="/games/hold">開始挑戰</a></div>
+    <div class="card"><h2>📝 十個臭咘咘優點</h2><p>輸入至少 10 條、不重複的優點。</p><a class="btn" href="/games/ten-virtues">開始填寫</a></div>
+    <div class="card"><h2>🧠 回憶快問快答</h2><p>5 題回憶題，答對 4 題即過關。</p><a class="btn" href="/games/memory-quiz">開始作答</a></div>
+    <div class="card"><h2>🤝 貼心選擇題</h2><p>5 題情境選擇，答對 4 題即過關。</p><a class="btn" href="/games/caring-quiz">開始作答</a></div>
+    <div class="card"><h2>🗂️ 默契排序</h2><p>把 6 個事件排成正確時間線。</p><a class="btn" href="/games/timeline">開始排序</a></div>
+    <div class="card">
+      <h2>🥊 壓力小遊戲</h2>
+      <p>既有遊戲：回報 KO 成績、看週統計與解鎖任務。</p>
+      <a class="btn" href="/dash/game">前往壓力小遊戲</a>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+GAMES_HB_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }}｜紅包規則</title>
+  <style>
+    body{margin:0;background:#fff7ed;color:#422006;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+    .wrap{max-width:920px;margin:0 auto;padding:22px 16px 40px;}
+    .card{background:#fff;border:1px solid #fed7aa;border-radius:16px;padding:16px;margin-top:12px;}
+    table{width:100%;border-collapse:collapse;background:#fff;}
+    th,td{padding:10px;border-bottom:1px solid #fed7aa;text-align:left;}
+    th{background:#ffedd5;}
+    .muted{color:#9a3412;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🧧 心動九日紅包</h1>
+    <p class="muted">抽取方式：請回到 LINE 輸入「紅包」並點卡片按鈕抽取。每日只可領一次，金額為固定配置。</p>
+    <div class="card">
+      <table>
+        <thead><tr><th>日期</th><th>Day</th><th>主題</th><th>固定金額</th></tr></thead>
+        <tbody>
+          {% for d in days %}
+          <tr>
+            <td>{{ d.date }}</td>
+            <td>{{ d.day_index }}</td>
+            <td>{{ d.icon }} {{ d.title }}</td>
+            <td>NT$ {{ d.amount }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>"""
+
+GAME_HOLD_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{ bot_name }}｜心跳長按</title>
+<style>
+body{margin:0;background:#fff1f2;color:#4c0519;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+.wrap{max-width:760px;margin:0 auto;padding:22px 16px 36px;}
+.card{background:#fff;border:1px solid #fecdd3;border-radius:16px;padding:16px;}
+.btn{padding:12px 20px;border:none;border-radius:999px;background:#be123c;color:#fff;font-size:18px;font-weight:700;cursor:pointer;}
+.btn[disabled]{opacity:.45;cursor:not-allowed;}
+.info{color:#9f1239;font-size:14px;}
+</style></head>
+<body><div class="wrap"><div class="card">
+<h1>💓 心跳長按</h1><p class="info">按住按鈕，鬆開時越接近目標越好（容錯 ±220ms）。</p>
+<p id="target">目標：--</p>
+<button class="btn" id="holdBtn">按住我</button>
+<p id="result"></p>
+<p><a href="/games">回遊戲大廳</a></p>
+</div></div>
+<script>
+(() => {
+  const target = 2200 + Math.floor(Math.random() * 1801);
+  const allow = 220;
+  const btn = document.getElementById("holdBtn");
+  const t = document.getElementById("target");
+  const r = document.getElementById("result");
+  t.textContent = "目標：" + (target / 1000).toFixed(2) + " 秒";
+  let start = 0; let holding = false;
+  const begin = (ev) => { ev.preventDefault(); if (holding) return; holding = true; start = performance.now(); r.textContent = "計時中..."; };
+  const end = (ev) => {
+    ev.preventDefault(); if (!holding) return; holding = false;
+    const d = performance.now() - start; const diff = Math.abs(Math.round(d) - target);
+    if (diff <= allow) r.textContent = "過關！差 " + diff + " ms";
+    else r.textContent = "差 " + diff + " ms，再試一次";
+  };
+  btn.addEventListener("mousedown", begin); btn.addEventListener("mouseup", end);
+  btn.addEventListener("touchstart", begin, {passive:false}); btn.addEventListener("touchend", end, {passive:false});
+})();
+</script></body></html>"""
+
+GAME_TEN_VIRTUES_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{ bot_name }}｜十個臭咘咘優點</title>
+<style>
+body{margin:0;background:#f0f9ff;color:#082f49;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+.wrap{max-width:760px;margin:0 auto;padding:22px 16px 36px;}
+.card{background:#fff;border:1px solid #bae6fd;border-radius:16px;padding:16px;}
+textarea{width:100%;min-height:220px;border:1px solid #7dd3fc;border-radius:10px;padding:10px;font-size:15px;}
+.btn{margin-top:12px;padding:10px 14px;border-radius:10px;border:1px solid #0369a1;background:#0284c7;color:#fff;}
+.ok{color:#0f766e;font-weight:700}.fail{color:#b91c1c;font-weight:700}
+.muted{font-size:13px;color:#0369a1}
+</style></head>
+<body><div class="wrap"><div class="card">
+<h1>📝 十個臭咘咘優點</h1>
+<p class="muted">每行一點，至少 10 條；每條至少 2 字；不可重複。</p>
+{% if message %}<p class="{{ 'ok' if passed else 'fail' }}">{{ message }}</p>{% endif %}
+<form method="post">
+  <textarea name="virtues" placeholder="例如：很有耐心\n很會照顧人">{{ virtues_text }}</textarea>
+  <br /><button class="btn" type="submit">送出檢查</button>
+</form>
+<p><a href="/games">回遊戲大廳</a></p>
+</div></div></body></html>"""
+
+GAME_MEMORY_QUIZ_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{ bot_name }}｜回憶快問快答</title>
+<style>
+body{margin:0;background:#fefce8;color:#422006;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+.wrap{max-width:760px;margin:0 auto;padding:22px 16px 36px;}
+.card{background:#fff;border:1px solid #fde68a;border-radius:16px;padding:16px;}
+input{width:100%;margin-top:6px;margin-bottom:10px;padding:8px;border:1px solid #facc15;border-radius:8px;}
+.btn{padding:10px 14px;border-radius:10px;border:1px solid #ca8a04;background:#ca8a04;color:#fff;}
+.ok{color:#0f766e;font-weight:700}.fail{color:#b91c1c;font-weight:700}
+</style></head>
+<body><div class="wrap"><div class="card">
+<h1>🧠 回憶快問快答</h1>
+<p>5 題，答對 4 題即過關。</p>
+{% if message %}<p class="{{ 'ok' if passed else 'fail' }}">{{ message }}</p>{% endif %}
+<form method="post">
+{% for q in questions %}
+  <label>{{ loop.index }}. {{ q.q }}</label>
+  <input type="text" name="q{{ loop.index0 }}" value="{{ answers[loop.index0] if answers else '' }}" />
+{% endfor %}
+  <button class="btn" type="submit">送出答案</button>
+</form>
+<p><a href="/games">回遊戲大廳</a></p>
+</div></div></body></html>"""
+
+GAME_CARING_QUIZ_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{ bot_name }}｜貼心選擇題</title>
+<style>
+body{margin:0;background:#f5f3ff;color:#312e81;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+.wrap{max-width:820px;margin:0 auto;padding:22px 16px 36px;}
+.card{background:#fff;border:1px solid #c4b5fd;border-radius:16px;padding:16px;}
+.q{margin-top:12px;padding:10px;border:1px solid #ddd6fe;border-radius:10px;}
+.btn{margin-top:12px;padding:10px 14px;border-radius:10px;border:1px solid #6366f1;background:#6366f1;color:#fff;}
+.ok{color:#0f766e;font-weight:700}.fail{color:#b91c1c;font-weight:700}
+</style></head>
+<body><div class="wrap"><div class="card">
+<h1>🤝 貼心選擇題</h1>
+<p>5 題，答對 4 題即過關。</p>
+{% if message %}<p class="{{ 'ok' if passed else 'fail' }}">{{ message }}</p>{% endif %}
+<form method="post">
+{% for q in questions %}
+  {% set qidx = loop.index0 %}
+  <div class="q">
+    <div>{{ loop.index }}. {{ q.q }}</div>
+    {% for op in q.options %}
+      <label><input type="radio" name="q{{ qidx }}" value="{{ loop.index0 }}" {% if selected and selected[qidx] == loop.index0 %}checked{% endif %}/> {{ op }}</label><br />
+    {% endfor %}
+  </div>
+{% endfor %}
+  <button class="btn" type="submit">送出答案</button>
+</form>
+<p><a href="/games">回遊戲大廳</a></p>
+</div></div></body></html>"""
+
+GAME_TIMELINE_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{ bot_name }}｜默契排序</title>
+<style>
+body{margin:0;background:#ecfeff;color:#164e63;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+.wrap{max-width:820px;margin:0 auto;padding:22px 16px 36px;}
+.card{background:#fff;border:1px solid #a5f3fc;border-radius:16px;padding:16px;}
+.row{display:flex;gap:10px;align-items:center;margin-top:8px;}
+select{padding:6px;border:1px solid #67e8f9;border-radius:8px;}
+.btn{margin-top:12px;padding:10px 14px;border-radius:10px;border:1px solid #0891b2;background:#0891b2;color:#fff;}
+.ok{color:#0f766e;font-weight:700}.fail{color:#b91c1c;font-weight:700}
+</style></head>
+<body><div class="wrap"><div class="card">
+<h1>🗂️ 默契排序</h1>
+<p>把每個事件填上順序（1 最早，6 最晚）。全對或只錯 1 個視為過關。</p>
+{% if message %}<p class="{{ 'ok' if passed else 'fail' }}">{{ message }}</p>{% endif %}
+<form method="post">
+{% for e in events %}
+  <div class="row">
+    <select name="e{{ loop.index0 }}">
+      <option value="">--</option>
+      {% for n in range(1, 7) %}
+      <option value="{{ n }}" {% if selected and selected[loop.index0] == n %}selected{% endif %}>{{ n }}</option>
+      {% endfor %}
+    </select>
+    <div>{{ e }}</div>
+  </div>
+{% endfor %}
+  <button class="btn" type="submit">送出排序</button>
+</form>
+<p><a href="/games">回遊戲大廳</a></p>
+</div></div></body></html>"""
+
+MEMORY_QUIZ_QUESTIONS = [
+    {"q": "第一次正式約會最常提到的地點是？", "answers": ["咖啡廳", "咖啡店"]},
+    {"q": "你們最常點的宵夜類型是？", "answers": ["鹽酥雞", "炸物"]},
+    {"q": "最常互叫的暱稱關鍵字是？", "answers": ["臭寶", "臭咘咘", "臭晡晡"]},
+    {"q": "一起最常做的休閒活動是？", "answers": ["散步", "追劇"]},
+    {"q": "最常用來收尾的一句話是？", "answers": ["晚安", "愛你"]},
+]
+
+CARING_QUIZ_QUESTIONS = [
+    {"q": "對方說今天很累，你第一句最適合：", "options": ["你怎麼那麼脆弱", "先休息，我在這裡", "你去忙吧"], "answer": 1},
+    {"q": "對方生氣時，較好的做法：", "options": ["先反駁澄清", "先接住情緒再討論", "先已讀不回"], "answer": 1},
+    {"q": "對方說不舒服時，優先：", "options": ["問要不要喝水或休息", "叫她不要想太多", "直接轉移話題"], "answer": 0},
+    {"q": "發現誤會時，先做哪件事？", "options": ["先道歉一句", "先列對方錯誤", "先離開對話"], "answer": 0},
+    {"q": "對方分享心事時，較好的回應：", "options": ["我懂你，願意多說一點嗎", "這有什麼好難過", "改天再說"], "answer": 0},
+]
+
+TIMELINE_EVENTS = ["第一次認識", "第一次長聊", "第一次單獨見面", "第一次正式約會", "第一次旅行", "現在"]
+
 
 # ====== routes ======
 @app.route("/")
@@ -3270,6 +3712,142 @@ def docs_plain():
     # 方便你 debug（純文字完整版）
     return (help_text(), 200, {"Content-Type": "text/plain; charset=utf-8"})
 
+
+@app.route("/games")
+def games_home():
+    return render_template_string(GAMES_TEMPLATE, bot_name=BOT_NAME)
+
+
+@app.route("/games/hb")
+def games_hb():
+    return render_template_string(GAMES_HB_TEMPLATE, bot_name=BOT_NAME, days=HB_EVENT_DAYS)
+
+
+@app.route("/games/hold")
+def games_hold():
+    return render_template_string(GAME_HOLD_TEMPLATE, bot_name=BOT_NAME)
+
+
+def _normalize_answer_text(s: str) -> str:
+    return re.sub(r"\s+", "", (s or "").strip().lower())
+
+
+@app.route("/games/ten-virtues", methods=["GET", "POST"])
+def games_ten_virtues():
+    message = ""
+    passed = False
+    virtues_text = ""
+    if request.method == "POST":
+        virtues_text = (request.form.get("virtues") or "").strip()
+        lines = [x.strip() for x in virtues_text.splitlines() if x.strip()]
+        normalized = [_normalize_answer_text(x) for x in lines]
+        unique_count = len(set(normalized))
+        too_short = [x for x in lines if len(_normalize_answer_text(x)) < 2]
+        if len(lines) < 10:
+            message = f"目前只有 {len(lines)} 條，還需要至少 10 條。"
+        elif unique_count < 10:
+            message = "有重複內容，請改成至少 10 條不重複優點。"
+        elif too_short:
+            message = "有條目太短，請每條至少 2 字。"
+        else:
+            passed = True
+            message = f"過關！你寫了 {len(lines)} 條且內容不重複。"
+    return render_template_string(
+        GAME_TEN_VIRTUES_TEMPLATE,
+        bot_name=BOT_NAME,
+        message=message,
+        passed=passed,
+        virtues_text=virtues_text,
+    )
+
+
+@app.route("/games/memory-quiz", methods=["GET", "POST"])
+def games_memory_quiz():
+    message = ""
+    passed = False
+    answers: list[str] = ["" for _ in MEMORY_QUIZ_QUESTIONS]
+    if request.method == "POST":
+        score = 0
+        for i, q in enumerate(MEMORY_QUIZ_QUESTIONS):
+            ans = (request.form.get(f"q{i}") or "").strip()
+            answers[i] = ans
+            n = _normalize_answer_text(ans)
+            if any(_normalize_answer_text(acc) in n or n in _normalize_answer_text(acc) for acc in q["answers"]):
+                score += 1
+        passed = score >= 4
+        message = f"你答對 {score}/5 題。{'過關！' if passed else '再試一次。'}"
+    return render_template_string(
+        GAME_MEMORY_QUIZ_TEMPLATE,
+        bot_name=BOT_NAME,
+        questions=MEMORY_QUIZ_QUESTIONS,
+        answers=answers,
+        message=message,
+        passed=passed,
+    )
+
+
+@app.route("/games/caring-quiz", methods=["GET", "POST"])
+def games_caring_quiz():
+    message = ""
+    passed = False
+    selected: list[int | None] = [None for _ in CARING_QUIZ_QUESTIONS]
+    if request.method == "POST":
+        score = 0
+        for i, q in enumerate(CARING_QUIZ_QUESTIONS):
+            raw = (request.form.get(f"q{i}") or "").strip()
+            try:
+                v = int(raw)
+            except Exception:
+                v = -1
+            if v >= 0:
+                selected[i] = v
+            if v == int(q["answer"]):
+                score += 1
+        passed = score >= 4
+        message = f"你答對 {score}/5 題。{'過關！' if passed else '再試一次。'}"
+    return render_template_string(
+        GAME_CARING_QUIZ_TEMPLATE,
+        bot_name=BOT_NAME,
+        questions=CARING_QUIZ_QUESTIONS,
+        selected=selected,
+        message=message,
+        passed=passed,
+    )
+
+
+@app.route("/games/timeline", methods=["GET", "POST"])
+def games_timeline():
+    message = ""
+    passed = False
+    selected: list[int | None] = [None for _ in TIMELINE_EVENTS]
+    if request.method == "POST":
+        arr: list[int] = []
+        for i in range(len(TIMELINE_EVENTS)):
+            raw = (request.form.get(f"e{i}") or "").strip()
+            try:
+                v = int(raw)
+            except Exception:
+                v = 0
+            if 1 <= v <= 6:
+                selected[i] = v
+            arr.append(v)
+        if any(v == 0 for v in arr):
+            message = "請把 6 個事件都填上順序。"
+        elif len(set(arr)) != len(arr):
+            message = "排序不能重複，1~6 必須各用一次。"
+        else:
+            correct = [1, 2, 3, 4, 5, 6]
+            wrong = sum(1 for i, v in enumerate(arr) if v != correct[i])
+            passed = wrong <= 1
+            message = f"你有 {wrong} 個位置不一致。{'過關！' if passed else '再試一次。'}"
+    return render_template_string(
+        GAME_TIMELINE_TEMPLATE,
+        bot_name=BOT_NAME,
+        events=TIMELINE_EVENTS,
+        selected=selected,
+        message=message,
+        passed=passed,
+    )
 
 
 
