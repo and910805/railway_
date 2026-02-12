@@ -3470,11 +3470,9 @@ GAMES_TEMPLATE = """<!doctype html>
     <div class="card"><h2>🧠 回憶快問快答</h2><p>5 題回憶題，答對 4 題即過關。</p><a class="btn" href="/games/memory-quiz">開始作答</a></div>
     <div class="card"><h2>🤝 貼心選擇題</h2><p>5 題情境選擇，答對 4 題即過關。</p><a class="btn" href="/games/caring-quiz">開始作答</a></div>
     <div class="card"><h2>🗂️ 默契排序</h2><p>把 6 個事件排成正確時間線。</p><a class="btn" href="/games/timeline">開始排序</a></div>
-    <div class="card">
-      <h2>🥊 壓力小遊戲</h2>
-      <p>既有遊戲：回報 KO 成績、看週統計與解鎖任務。</p>
-      <a class="btn" href="/dash/game">前往壓力小遊戲</a>
-    </div>
+    <div class="card"><h2>🔤 關鍵字接龍</h2><p>連續輸入 5 個不重複關鍵字，完成接龍。</p><a class="btn" href="/games/word-chain">開始接龍</a></div>
+    <div class="card"><h2>🔐 表情密碼</h2><p>看 emoji 猜意思，5 題答對 4 題過關。</p><a class="btn" href="/games/emoji-code">開始破譯</a></div>
+    <div class="card"><h2>📸 每日拍照任務</h2><p>每天主題 + 姿勢 + 場景條件，交照片等審核。</p><a class="btn" href="/games/photo-mission">開始任務</a></div>
   </div>
 </body>
 </html>"""
@@ -3669,6 +3667,92 @@ select{padding:6px;border:1px solid #67e8f9;border-radius:8px;}
 <p><a href="/games">回遊戲大廳</a></p>
 </div></div></body></html>"""
 
+GAME_WORD_CHAIN_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{ bot_name }}｜關鍵字接龍</title>
+<style>
+body{margin:0;background:#ecfccb;color:#365314;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+.wrap{max-width:760px;margin:0 auto;padding:22px 16px 36px;}
+.card{background:#fff;border:1px solid #bef264;border-radius:16px;padding:16px;}
+input{width:100%;padding:10px;border:1px solid #a3e635;border-radius:10px;}
+.btn{margin-top:10px;padding:10px 14px;border-radius:10px;border:1px solid #65a30d;background:#65a30d;color:#fff;}
+.muted{font-size:13px;color:#4d7c0f}.ok{color:#0f766e;font-weight:700}.fail{color:#b91c1c;font-weight:700}
+ul{padding-left:20px;}
+</style></head>
+<body><div class="wrap"><div class="card">
+<h1>🔤 關鍵字接龍</h1>
+<p class="muted">規則：輸入 5 個不重複關鍵字。每個至少 2 字。</p>
+<p>目前進度：<span id="step">0</span>/5</p>
+<input id="wordInput" type="text" placeholder="輸入關鍵字（例如：散步）" />
+<button class="btn" id="addBtn" type="button">加入</button>
+<p id="msg"></p>
+<ul id="list"></ul>
+<p><a href="/games">回遊戲大廳</a></p>
+</div></div>
+<script>
+(() => {
+  const words = [];
+  const step = document.getElementById("step");
+  const msg = document.getElementById("msg");
+  const list = document.getElementById("list");
+  const input = document.getElementById("wordInput");
+  const btn = document.getElementById("addBtn");
+  function normalize(s){ return (s || "").trim().toLowerCase().replace(/\\s+/g, ""); }
+  function paint(){
+    step.textContent = String(words.length);
+    list.innerHTML = words.map((w) => "<li>"+w+"</li>").join("");
+    if(words.length >= 5){
+      msg.className = "ok";
+      msg.textContent = "過關！你完成 5 步關鍵字接龍。";
+      btn.disabled = true;
+      input.disabled = true;
+    }
+  }
+  btn.addEventListener("click", () => {
+    const raw = input.value || "";
+    const n = normalize(raw);
+    if(!n){ msg.className="fail"; msg.textContent="請先輸入關鍵字。"; return; }
+    if(n.length < 2){ msg.className="fail"; msg.textContent="關鍵字至少 2 字。"; return; }
+    if(words.map(normalize).includes(n)){ msg.className="fail"; msg.textContent="不能重複。"; return; }
+    words.push(raw.trim());
+    msg.className = "";
+    msg.textContent = "";
+    input.value = "";
+    paint();
+  });
+})();
+</script></body></html>"""
+
+GAME_EMOJI_CODE_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{ bot_name }}｜表情密碼</title>
+<style>
+body{margin:0;background:#f3e8ff;color:#4c1d95;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+.wrap{max-width:820px;margin:0 auto;padding:22px 16px 36px;}
+.card{background:#fff;border:1px solid #d8b4fe;border-radius:16px;padding:16px;}
+.q{margin-top:12px;padding:10px;border:1px solid #e9d5ff;border-radius:10px;}
+.btn{margin-top:12px;padding:10px 14px;border-radius:10px;border:1px solid #7c3aed;background:#7c3aed;color:#fff;}
+.ok{color:#0f766e;font-weight:700}.fail{color:#b91c1c;font-weight:700}
+</style></head>
+<body><div class="wrap"><div class="card">
+<h1>🔐 表情密碼</h1>
+<p>5 題，答對 4 題即過關。</p>
+{% if message %}<p class="{{ 'ok' if passed else 'fail' }}">{{ message }}</p>{% endif %}
+<form method="post">
+{% for q in questions %}
+  {% set qidx = loop.index0 %}
+  <div class="q">
+    <div>{{ loop.index }}. {{ q.code }}</div>
+    {% for op in q.options %}
+      <label><input type="radio" name="q{{ qidx }}" value="{{ loop.index0 }}" {% if selected and selected[qidx] == loop.index0 %}checked{% endif %}/> {{ op }}</label><br />
+    {% endfor %}
+  </div>
+{% endfor %}
+  <button class="btn" type="submit">送出答案</button>
+</form>
+<p><a href="/games">回遊戲大廳</a></p>
+</div></div></body></html>"""
+
 MEMORY_QUIZ_QUESTIONS = [
     {"q": "第一次正式約會最常提到的地點是？", "answers": ["咖啡廳", "咖啡店"]},
     {"q": "你們最常點的宵夜類型是？", "answers": ["鹽酥雞", "炸物"]},
@@ -3686,6 +3770,302 @@ CARING_QUIZ_QUESTIONS = [
 ]
 
 TIMELINE_EVENTS = ["第一次認識", "第一次長聊", "第一次單獨見面", "第一次正式約會", "第一次旅行", "現在"]
+
+EMOJI_CODE_QUESTIONS = [
+    {"code": "🍽️💤", "options": ["吃飽就睡", "先睡再吃", "夢到晚餐"], "answer": 0},
+    {"code": "☕🌧️📖", "options": ["雨天在家看書", "去跑步", "出門唱歌"], "answer": 0},
+    {"code": "📱❤️", "options": ["手機沒電", "發訊息說愛你", "看影片"], "answer": 1},
+    {"code": "🌙😴💤", "options": ["熬夜追劇", "晚安睡覺", "半夜出門"], "answer": 1},
+    {"code": "🚶‍♀️🚶‍♂️🌳", "options": ["一起散步", "搭車上班", "逛百貨"], "answer": 0},
+]
+
+PHOTO_MISSION_TOPICS = [
+    "臭咘咘跟臭寶的合照",
+    "一起比出今日心情",
+    "一起做搞怪表情自拍",
+    "一起和今天的天氣合照",
+    "一起和晚餐合照",
+]
+PHOTO_MISSION_POSES = [
+    "雙手愛心",
+    "比 YA 貼臉",
+    "一起看鏡頭大笑",
+    "背靠背比讚",
+    "一人指向另一人",
+]
+PHOTO_MISSION_SCENES = [
+    "畫面要看得到天空",
+    "畫面要看得到桌面或餐點",
+    "畫面要看得到門口或走道",
+    "畫面要看得到一個紅色物件",
+    "畫面要看得到一個圓形物件",
+]
+
+
+PHOTO_MISSION_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{ bot_name }}｜每日拍照任務</title>
+<style>
+body{margin:0;background:#fef2f2;color:#450a0a;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+.wrap{max-width:920px;margin:0 auto;padding:22px 16px 36px;}
+.card{background:#fff;border:1px solid #fecaca;border-radius:16px;padding:16px;margin-top:12px;}
+.muted{color:#991b1b;font-size:13px;}
+.ok{color:#0f766e;font-weight:700}.fail{color:#b91c1c;font-weight:700}
+input[type=text]{width:100%;padding:9px;border:1px solid #fca5a5;border-radius:9px;}
+input[type=file]{margin-top:8px;}
+.btn{margin-top:12px;padding:10px 14px;border-radius:10px;border:1px solid #dc2626;background:#dc2626;color:#fff;}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:10px;}
+.grid img{width:100%;height:180px;object-fit:cover;border-radius:10px;border:1px solid #fecaca;}
+.badge{display:inline-block;padding:4px 8px;border-radius:999px;font-size:12px;}
+.pending{background:#fef3c7;color:#92400e}.approved{background:#dcfce7;color:#166534}.rejected{background:#fee2e2;color:#991b1b}
+</style></head>
+<body><div class="wrap">
+  <h1>📸 每日拍照任務</h1>
+  <div class="card">
+    <div><strong>今日主題：</strong>{{ mission.topic }}</div>
+    <div><strong>指定姿勢：</strong>{{ mission.pose }}</div>
+    <div><strong>畫面條件：</strong>{{ mission.scene }}</div>
+    <p class="muted">每天題目會更新。一次上傳 1~3 張，送出後等待審核。</p>
+  </div>
+  <div class="card">
+    <h2>上傳作業</h2>
+    {% if message %}<p class="{{ 'ok' if ok else 'fail' }}">{{ message }}</p>{% endif %}
+    <form method="post" enctype="multipart/form-data">
+      <label>你的名字</label>
+      <input type="text" name="submitter_name" value="{{ submitter_name }}" placeholder="例如：臭寶" required />
+      <label>上傳照片（可多選 1~3 張）</label><br />
+      <input type="file" name="photos" accept="image/*" multiple required />
+      <br /><button class="btn" type="submit">送出任務</button>
+    </form>
+    <p class="muted">審核頁：`/dash/photo-missions`</p>
+  </div>
+  {% if latest %}
+  <div class="card">
+    <h2>我最近一次提交</h2>
+    <div>
+      <span class="badge {{ latest.status }}">{{ latest.status_text }}</span>
+      <span class="muted"> {{ latest.created_at }}</span>
+    </div>
+    {% if latest.reviewer_note %}<p>審核備註：{{ latest.reviewer_note }}</p>{% endif %}
+    <div class="grid">
+      {% for p in latest.photo_urls %}<a href="{{ p }}" target="_blank"><img src="{{ p }}" /></a>{% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  <p><a href="/games">回遊戲大廳</a></p>
+</div></body></html>"""
+
+
+DASH_PHOTO_MISSIONS_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{ bot_name }}｜拍照任務審核</title>
+<style>
+body{margin:0;background:#f8fafc;color:#0f172a;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+.wrap{max-width:1100px;margin:0 auto;padding:22px 16px 36px;}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:14px;margin-top:12px;}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-top:10px;}
+.grid img{width:100%;height:160px;object-fit:cover;border-radius:10px;border:1px solid #e2e8f0;}
+.muted{color:#64748b;font-size:13px;}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;}
+.btn{padding:8px 12px;border-radius:9px;border:1px solid #cbd5e1;background:#fff;cursor:pointer;}
+.btn.ok{border-color:#16a34a;color:#166534;background:#f0fdf4;}
+.btn.no{border-color:#ef4444;color:#991b1b;background:#fef2f2;}
+input[type=text]{padding:8px;border:1px solid #cbd5e1;border-radius:8px;min-width:300px;}
+.badge{display:inline-block;padding:4px 8px;border-radius:999px;font-size:12px;}
+.pending{background:#fef3c7;color:#92400e}.approved{background:#dcfce7;color:#166534}.rejected{background:#fee2e2;color:#991b1b}
+</style></head>
+<body><div class="wrap">
+  <h1>📸 拍照任務審核</h1>
+  <p class="muted">更新時間：{{ updated_at }} · <a href="/dash">回儀表板</a> · <a href="/games/photo-mission">任務頁</a></p>
+  {% if status %}<div class="card">{{ status }}</div>{% endif %}
+  {% for it in items %}
+    <div class="card">
+      <div><strong>#{{ it.id }}</strong> {{ it.submitter_name }} <span class="muted">({{ it.submitter_uid or 'guest' }})</span></div>
+      <div class="muted">{{ it.created_at }} · {{ it.mission_date }} · {{ it.mission_topic }} / {{ it.mission_pose }} / {{ it.mission_scene }}</div>
+      <div><span class="badge {{ it.status }}">{{ it.status_text }}</span></div>
+      {% if it.reviewer_note %}<div class="muted">備註：{{ it.reviewer_note }}</div>{% endif %}
+      <div class="grid">
+        {% for p in it.photo_urls %}<a href="{{ p }}" target="_blank"><img src="{{ p }}" /></a>{% endfor %}
+      </div>
+      {% if it.status == 'pending' %}
+      <form method="post" class="row">
+        <input type="hidden" name="submission_id" value="{{ it.id }}" />
+        <input type="text" name="reviewer_note" placeholder="可選：審核備註" />
+        <button class="btn ok" name="action" value="approve" type="submit">通過</button>
+        <button class="btn no" name="action" value="reject" type="submit">退回</button>
+      </form>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div></body></html>"""
+
+
+def _photo_mission_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(LOVE_DB_PATH, timeout=20, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _photo_mission_ensure_table() -> None:
+    conn = _photo_mission_conn()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS game_photo_mission_submissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mission_date TEXT NOT NULL,
+                mission_topic TEXT NOT NULL,
+                mission_pose TEXT NOT NULL,
+                mission_scene TEXT NOT NULL,
+                submitter_uid TEXT,
+                submitter_name TEXT NOT NULL,
+                photo_ids_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                reviewer_uid TEXT,
+                reviewer_note TEXT,
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_game_photo_mission_date ON game_photo_mission_submissions(mission_date, status, created_at DESC)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _photo_mission_for_day(day: datetime.date) -> dict:
+    seed = int(day.toordinal())
+    topic = PHOTO_MISSION_TOPICS[seed % len(PHOTO_MISSION_TOPICS)]
+    pose = PHOTO_MISSION_POSES[(seed * 3 + 1) % len(PHOTO_MISSION_POSES)]
+    scene = PHOTO_MISSION_SCENES[(seed * 5 + 2) % len(PHOTO_MISSION_SCENES)]
+    return {"date": day.isoformat(), "topic": topic, "pose": pose, "scene": scene}
+
+
+def _photo_mission_media_url(message_id: str) -> str:
+    if MEDIA_ACCESS_TOKEN:
+        return f"/media/{message_id}?k={MEDIA_ACCESS_TOKEN}"
+    return f"/media/{message_id}"
+
+
+def _photo_mission_save_upload(file_storage) -> tuple[str, str] | None:
+    ctype = (file_storage.mimetype or "").split(";")[0].strip().lower()
+    if not ctype.startswith("image/"):
+        return None
+    ext = mimetypes.guess_extension(ctype) or ".jpg"
+    if ext in (".jpe", ".jpeg"):
+        ext = ".jpg"
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        ext = ".jpg"
+
+    message_id = f"pm_{int(time.time() * 1000)}_{os.urandom(4).hex()}"
+    filename = f"{message_id}{ext}"
+    filepath = MEDIA_DIR / filename
+    file_storage.save(filepath)
+    save_media_record(
+        db_path=LOVE_DB_PATH,
+        message_id=message_id,
+        filename=filename,
+        content_type=ctype,
+        from_user_id="photo_mission",
+        created_at=_iso_now(),
+    )
+    return message_id, filename
+
+
+def _photo_mission_create_submission(
+    mission: dict,
+    submitter_uid: str,
+    submitter_name: str,
+    photo_ids: list[str],
+) -> int:
+    _photo_mission_ensure_table()
+    conn = _photo_mission_conn()
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO game_photo_mission_submissions(
+                mission_date, mission_topic, mission_pose, mission_scene,
+                submitter_uid, submitter_name, photo_ids_json, status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (
+                str(mission["date"]),
+                str(mission["topic"]),
+                str(mission["pose"]),
+                str(mission["scene"]),
+                (submitter_uid or "").strip() or None,
+                submitter_name,
+                json.dumps(photo_ids, ensure_ascii=False),
+                _iso_now(),
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        conn.close()
+
+
+def _photo_mission_status_text(status: str) -> str:
+    s = (status or "").strip().lower()
+    if s == "approved":
+        return "已通過"
+    if s == "rejected":
+        return "已退回"
+    return "待審核"
+
+
+def _photo_mission_list(limit: int = 60, submitter_uid: str | None = None) -> list[dict]:
+    _photo_mission_ensure_table()
+    conn = _photo_mission_conn()
+    try:
+        sql = "SELECT * FROM game_photo_mission_submissions"
+        params: list[object] = []
+        if submitter_uid:
+            sql += " WHERE submitter_uid=?"
+            params.append(submitter_uid)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(int(limit))
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    finally:
+        conn.close()
+
+    out: list[dict] = []
+    for r in rows:
+        item = dict(r)
+        try:
+            ids = json.loads(item.get("photo_ids_json") or "[]")
+        except Exception:
+            ids = []
+        item["photo_urls"] = [_photo_mission_media_url(str(x)) for x in ids if str(x).strip()]
+        st = str(item.get("status") or "pending").lower()
+        item["status"] = st
+        item["status_text"] = _photo_mission_status_text(st)
+        out.append(item)
+    return out
+
+
+def _photo_mission_review(submission_id: int, action: str, reviewer_uid: str, reviewer_note: str) -> bool:
+    action = (action or "").strip().lower()
+    if action not in ("approve", "reject"):
+        return False
+    status = "approved" if action == "approve" else "rejected"
+    _photo_mission_ensure_table()
+    conn = _photo_mission_conn()
+    try:
+        cur = conn.execute(
+            """
+            UPDATE game_photo_mission_submissions
+            SET status=?, reviewer_uid=?, reviewer_note=?, reviewed_at=?
+            WHERE id=? AND status='pending'
+            """,
+            (status, (reviewer_uid or "").strip() or None, (reviewer_note or "").strip(), _iso_now(), int(submission_id)),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0) == 1
+    finally:
+        conn.close()
 
 
 # ====== routes ======
@@ -3847,6 +4227,138 @@ def games_timeline():
         selected=selected,
         message=message,
         passed=passed,
+    )
+
+
+@app.route("/games/word-chain")
+def games_word_chain():
+    return render_template_string(GAME_WORD_CHAIN_TEMPLATE, bot_name=BOT_NAME)
+
+
+@app.route("/games/emoji-code", methods=["GET", "POST"])
+def games_emoji_code():
+    message = ""
+    passed = False
+    selected: list[int | None] = [None for _ in EMOJI_CODE_QUESTIONS]
+    if request.method == "POST":
+        score = 0
+        for i, q in enumerate(EMOJI_CODE_QUESTIONS):
+            raw = (request.form.get(f"q{i}") or "").strip()
+            try:
+                v = int(raw)
+            except Exception:
+                v = -1
+            if v >= 0:
+                selected[i] = v
+            if v == int(q["answer"]):
+                score += 1
+        passed = score >= 4
+        message = f"你答對 {score}/5 題。{'過關！' if passed else '再試一次。'}"
+    return render_template_string(
+        GAME_EMOJI_CODE_TEMPLATE,
+        bot_name=BOT_NAME,
+        questions=EMOJI_CODE_QUESTIONS,
+        selected=selected,
+        message=message,
+        passed=passed,
+    )
+
+
+@app.route("/games/photo-mission", methods=["GET", "POST"])
+def games_photo_mission():
+    now = _tz_now()
+    mission = _photo_mission_for_day(now.date())
+    message = ""
+    ok = False
+
+    submitter_uid = ""
+    submitter_name = ""
+    if _dashboard_session_valid():
+        submitter_uid = _dash_current_uid()
+        submitter_name = get_display_name(db_path=LOVE_DB_PATH, user_id=submitter_uid) or ""
+
+    if request.method == "POST":
+        submitter_name = (request.form.get("submitter_name") or submitter_name or "").strip()
+        if not submitter_name:
+            message = "請先填你的名字。"
+        else:
+            files = request.files.getlist("photos")
+            files = [f for f in files if f and (f.filename or "").strip()]
+            if not files:
+                message = "請至少上傳 1 張照片。"
+            elif len(files) > 3:
+                message = "一次最多上傳 3 張。"
+            else:
+                saved_ids: list[str] = []
+                bad_type = False
+                for f in files:
+                    saved = _photo_mission_save_upload(f)
+                    if not saved:
+                        bad_type = True
+                        break
+                    saved_ids.append(saved[0])
+                if bad_type:
+                    message = "檔案格式不支援，請上傳圖片檔。"
+                elif not saved_ids:
+                    message = "上傳失敗，請再試一次。"
+                else:
+                    sid = _photo_mission_create_submission(
+                        mission=mission,
+                        submitter_uid=submitter_uid,
+                        submitter_name=submitter_name,
+                        photo_ids=saved_ids,
+                    )
+                    ok = sid > 0
+                    message = "提交成功，等待審核。" if ok else "提交失敗，請稍後再試。"
+
+    latest = None
+    if submitter_uid:
+        mine = _photo_mission_list(limit=1, submitter_uid=submitter_uid)
+        latest = mine[0] if mine else None
+
+    return render_template_string(
+        PHOTO_MISSION_TEMPLATE,
+        bot_name=BOT_NAME,
+        mission=mission,
+        message=message,
+        ok=ok,
+        submitter_name=submitter_name,
+        latest=latest,
+    )
+
+
+@app.route("/dash/photo-missions", methods=["GET", "POST"])
+def dash_photo_missions():
+    resp = _dash_require_page()
+    if resp is not None:
+        return resp
+
+    status = ""
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        try:
+            submission_id = int(request.form.get("submission_id") or 0)
+        except Exception:
+            submission_id = 0
+        note = (request.form.get("reviewer_note") or "").strip()
+        if submission_id <= 0:
+            status = "提交編號錯誤。"
+        else:
+            done = _photo_mission_review(
+                submission_id=submission_id,
+                action=action,
+                reviewer_uid=_dash_current_uid(),
+                reviewer_note=note,
+            )
+            status = "已更新審核結果。" if done else "更新失敗（可能已審核過）。"
+
+    items = _photo_mission_list(limit=80)
+    return render_template_string(
+        DASH_PHOTO_MISSIONS_TEMPLATE,
+        bot_name=BOT_NAME,
+        updated_at=_tz_now().strftime("%Y-%m-%d %H:%M:%S"),
+        items=items,
+        status=status,
     )
 
 
