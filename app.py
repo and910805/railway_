@@ -826,6 +826,58 @@ def duo_done_today(now: datetime.datetime) -> bool:
     d = (_get_setting_global("duo_done_day") or "").strip()
     return d == now.date().isoformat()
 
+def _hb_rule_title() -> str:
+    return _get_str_setting_global("hb_rule_title", "🧧 心動九日紅包｜完整規則（給臭寶）")
+
+def _hb_rule_intro() -> str:
+    return _get_str_setting_global("hb_rule_intro", "活動期間：{start} ~ {end}（共 {days} 天）")
+
+def _hb_rule_eligibility() -> str:
+    return _get_str_setting_global("hb_rule_eligibility", "參加資格：僅臭寶（girlfriend）可抽紅包。")
+
+def _hb_rule_draw_method() -> str:
+    return _get_str_setting_global("hb_rule_draw_method", "抽取方式：每天在 LINE 輸入「抽紅包」或「開紅包」。")
+
+def _hb_rule_limit() -> str:
+    return _get_str_setting_global("hb_rule_limit", "抽取次數：每天限 1 次；當日重複輸入會回覆同一結果。")
+
+def _hb_rule_amount() -> str:
+    return _get_str_setting_global("hb_rule_amount", "金額規則：每日固定金額，不是隨機抽獎。")
+
+def _hb_rule_query_help() -> str:
+    return _get_str_setting_global("hb_rule_query_help", "查詢指令：輸入「今日紅包」可查今天是否已抽與金額。")
+
+def _hb_rule_postscript() -> str:
+    return _get_str_setting_global("hb_rule_postscript", "補充：活動僅限當日領取，錯過當日不補發。")
+
+def _hb_rule_message_text(base_url: str | None = None) -> str:
+    start = HB_EVENT_DAYS[0]["date"] if HB_EVENT_DAYS else "-"
+    end = HB_EVENT_DAYS[-1]["date"] if HB_EVENT_DAYS else "-"
+    intro_tpl = _hb_rule_intro()
+    try:
+        intro_line = intro_tpl.format(start=start, end=end, days=len(HB_EVENT_DAYS))
+    except Exception:
+        intro_line = f"活動期間：{start} ~ {end}（共 {len(HB_EVENT_DAYS)} 天）"
+
+    rule_lines = [
+        _hb_rule_title(),
+        intro_line,
+        _hb_rule_eligibility(),
+        _hb_rule_draw_method(),
+        _hb_rule_limit(),
+        _hb_rule_amount(),
+        _hb_rule_query_help(),
+        "",
+        "每日金額表：",
+    ]
+    for d in HB_EVENT_DAYS:
+        rule_lines.append(f"Day {int(d['day_index'])}（{d['date']}）NT$ {int(d['amount'])}｜{d.get('title') or ''}")
+    rule_lines.append("")
+    rule_lines.append(_hb_rule_postscript())
+    if base_url:
+        rule_lines.append(f"規則頁：{base_url}/games/hb")
+    return "\n".join(rule_lines)
+
 def _valentine_default_date() -> str:
     now = _tz_now().date()
     year = now.year
@@ -2634,10 +2686,7 @@ def handle_command(user_id: str, text: str) -> str:
             if amount is None:
                 return f"今天是 Day {int(ev['day_index'])}（{now}），尚未抽取。\n輸入「抽紅包」即可開獎。"
             return f"今天是 Day {int(ev['day_index'])}（{now}）\n固定紅包：NT$ {int(amount)}｜{ev.get('title') or ''}"
-        base_url = get_public_base_url()
-        if base_url:
-            return f"紅包規則頁：{base_url}/games/hb"
-        return "紅包規則：活動共 9 天，每日固定金額，請輸入「抽紅包」領取。"
+        return _hb_rule_message_text(base_url=get_public_base_url())
 
     if text.strip() in ("\u7d05\u5305\u6e2c\u8a66", "/test") or cmd_l in ("hbtest", "redtest"):
         return "紅包改為 LINE 內抽取，不再使用 /test。請輸入「紅包」或「抽紅包」。"
@@ -3463,7 +3512,7 @@ GAMES_TEMPLATE = """<!doctype html>
 <body>
   <div class="wrap">
     <h1 class="title">遊戲大廳</h1>
-    <p class="muted">每個遊戲分開獨立頁面。你指定的 5 款已先上線。</p>
+    <p class="muted">每個遊戲分開獨立頁面。指定的遊戲已上線，可直接逐一進入挑戰。</p>
     <div class="card"><h2>🧧 心動九日紅包</h2><p>抽取入口在 LINE 對話內，網頁僅規則。</p><a class="btn primary" href="/games/hb">查看規則</a></div>
     <div class="card"><h2>💓 心跳長按</h2><p>按住按鈕，盡量貼近目標秒數。</p><a class="btn" href="/games/hold">開始挑戰</a></div>
     <div class="card"><h2>📝 十個臭咘咘優點</h2><p>輸入至少 10 條、不重複的優點。</p><a class="btn" href="/games/ten-virtues">開始填寫</a></div>
@@ -5541,6 +5590,45 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
       </div>
 
       <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
+        <div class="text-lg font-semibold">紅包規則文案（LINE：紅包規則）</div>
+        <div class="mt-1 text-sm text-slate-600">可直接調整要發給女方的規則內容。活動日期與每日金額表會由系統自動附上。</div>
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label class="block md:col-span-2">
+            <div class="text-sm text-slate-600">標題</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="hb_rule_title" value="{{ hb_rule_title }}" />
+          </label>
+          <label class="block md:col-span-2">
+            <div class="text-sm text-slate-600">活動期間文案（可用 {start} / {end} / {days}）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="hb_rule_intro" value="{{ hb_rule_intro }}" />
+          </label>
+          <label class="block md:col-span-2">
+            <div class="text-sm text-slate-600">資格文案</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="hb_rule_eligibility" value="{{ hb_rule_eligibility }}" />
+          </label>
+          <label class="block md:col-span-2">
+            <div class="text-sm text-slate-600">抽取方式文案</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="hb_rule_draw_method" value="{{ hb_rule_draw_method }}" />
+          </label>
+          <label class="block md:col-span-2">
+            <div class="text-sm text-slate-600">抽取次數文案</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="hb_rule_limit" value="{{ hb_rule_limit }}" />
+          </label>
+          <label class="block md:col-span-2">
+            <div class="text-sm text-slate-600">金額規則文案</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="hb_rule_amount" value="{{ hb_rule_amount }}" />
+          </label>
+          <label class="block md:col-span-2">
+            <div class="text-sm text-slate-600">查詢指令文案</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="hb_rule_query_help" value="{{ hb_rule_query_help }}" />
+          </label>
+          <label class="block md:col-span-2">
+            <div class="text-sm text-slate-600">補充文案</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="hb_rule_postscript" value="{{ hb_rule_postscript }}" />
+          </label>
+        </div>
+      </div>
+
+      <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
         <div class="text-lg font-semibold">角色顯示名稱</div>
         <div class="mt-1 text-sm text-slate-600">儀表板顯示用（不影響 LINE 顯示名稱）。</div>
         <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -5556,7 +5644,8 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
       </div>
 
       <div class="flex items-center gap-3">
-        <button class="rounded-2xl bg-slate-900 text-white px-5 py-2" type="submit">儲存並套用</button>
+        <button class="rounded-2xl bg-slate-900 text-white px-5 py-2" type="submit" name="action" value="save">儲存並套用</button>
+        <button class="rounded-2xl border border-rose-300 bg-rose-50 px-5 py-2" type="submit" name="action" value="hb_send_now">儲存並立即派送紅包規則給女方</button>
         <a class="rounded-2xl border border-slate-300 px-5 py-2" href="/dash">取消</a>
       </div>
 
@@ -7250,6 +7339,7 @@ def dash_settings():
     error = ""
 
     if request.method == "POST":
+        action = (request.form.get("action") or "save").strip().lower()
         try:
             def _set(key: str, val: str):
                 set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=key, value=val)
@@ -7282,8 +7372,32 @@ def dash_settings():
             _set("valentine_date", (request.form.get("valentine_date") or _valentine_default_date()).strip())
             _set("valentine_messages", (request.form.get("valentine_messages") or "").strip())
 
+            # hongbao rules copy
+            for k in (
+                "hb_rule_title",
+                "hb_rule_intro",
+                "hb_rule_eligibility",
+                "hb_rule_draw_method",
+                "hb_rule_limit",
+                "hb_rule_amount",
+                "hb_rule_query_help",
+                "hb_rule_postscript",
+            ):
+                _set(k, (request.form.get(k) or "").strip())
+
             refresh_scheduler_jobs()
             status = "已儲存並套用。"
+            if action == "hb_send_now":
+                text = _hb_rule_message_text(base_url=get_public_base_url())
+                targets = [x for x in _get_role_ids("girlfriend") if (x or "").strip()]
+                if not targets:
+                    error = "找不到可推播的女方帳號（請先確認對方已設定身份並加入推播）。"
+                else:
+                    sent = 0
+                    for uid in sorted(set(targets)):
+                        push_and_log(uid, text, reason="HB_RULE_MANUAL", target_role="girlfriend")
+                        sent += 1
+                    status += f" 已手動派送紅包規則給女方（{sent} 位）。"
         except Exception as e:
             error = f"儲存失敗：{e}"
 
@@ -7338,6 +7452,14 @@ def dash_settings():
         "valentine_target_role": _valentine_target_role(),
         "valentine_date": _valentine_scheduled_date().isoformat(),
         "valentine_messages": _valentine_messages_text_setting(),
+        "hb_rule_title": _hb_rule_title(),
+        "hb_rule_intro": _hb_rule_intro(),
+        "hb_rule_eligibility": _hb_rule_eligibility(),
+        "hb_rule_draw_method": _hb_rule_draw_method(),
+        "hb_rule_limit": _hb_rule_limit(),
+        "hb_rule_amount": _hb_rule_amount(),
+        "hb_rule_query_help": _hb_rule_query_help(),
+        "hb_rule_postscript": _hb_rule_postscript(),
     }
     return render_template_string(DASH_SETTINGS_TEMPLATE, **data)
 
