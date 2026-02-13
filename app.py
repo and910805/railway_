@@ -868,10 +868,10 @@ def _hb_rule_message_text(base_url: str | None = None) -> str:
         _hb_rule_amount(),
         _hb_rule_query_help(),
         "",
-        "每日金額表：",
+        "每日日程（金額保密，當日揭曉）：",
     ]
     for d in HB_EVENT_DAYS:
-        rule_lines.append(f"Day {int(d['day_index'])}（{d['date']}）NT$ {int(d['amount'])}｜{d.get('title') or ''}")
+        rule_lines.append(f"Day {int(d['day_index'])}（{d['date']}）NT$ ???")
     rule_lines.append("")
     rule_lines.append(_hb_rule_postscript())
     if base_url:
