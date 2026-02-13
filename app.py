@@ -850,6 +850,102 @@ def _hb_rule_query_help() -> str:
 def _hb_rule_postscript() -> str:
     return _get_str_setting_global("hb_rule_postscript", "補充：活動僅限當日領取，錯過當日不補發。")
 
+HB_DAILY_GAME_PLAN = {
+    1: {"title": "心跳長按", "path": "/games/hold"},
+    2: {"title": "十個臭咘咘優點", "path": "/games/ten-virtues"},
+    3: {"title": "回憶快問快答", "path": "/games/memory-quiz"},
+    4: {"title": "貼心選擇題", "path": "/games/caring-quiz"},
+    5: {"title": "默契排序", "path": "/games/timeline"},
+    6: {"title": "關鍵字接龍", "path": "/games/word-chain"},
+    7: {"title": "表情密碼", "path": "/games/emoji-code"},
+    8: {"title": "每日拍照任務", "path": "/games/photo-mission"},
+    9: {"title": "心動九日紅包規則", "path": "/games/hb"},
+}
+
+def _hb_daily_game_push_enabled() -> bool:
+    return _get_bool_setting_global("hb_daily_game_push_enabled", True)
+
+def _hb_daily_game_push_hm() -> tuple[int, int]:
+    return _get_hhmm_setting_global("hb_daily_game_push_time", "12:00")
+
+def _hb_daily_game_sent_keys() -> set[str]:
+    raw = (_get_setting_global("hb_daily_game_sent_keys") or "").strip()
+    if not raw:
+        return set()
+    try:
+        arr = json.loads(raw)
+        if not isinstance(arr, list):
+            return set()
+        return {str(x) for x in arr if str(x).strip()}
+    except Exception:
+        return set()
+
+def _hb_daily_game_mark_sent(key: str):
+    keys = _hb_daily_game_sent_keys()
+    keys.add(key)
+    set_setting(
+        db_path=LOVE_DB_PATH,
+        user_id=SETTINGS_GLOBAL_USER_ID,
+        key="hb_daily_game_sent_keys",
+        value=json.dumps(sorted(keys), ensure_ascii=False),
+    )
+    try:
+        g._global_settings_map = None
+    except Exception:
+        pass
+
+def _hb_game_plan_for_day_index(day_index: int) -> dict:
+    return HB_DAILY_GAME_PLAN.get(int(day_index), {"title": "遊戲大廳", "path": "/games"})
+
+def _hb_today_game(now: datetime.datetime) -> dict | None:
+    ev = _hb_event_of_day(now.date().isoformat())
+    if not ev:
+        return None
+    day_index = int(ev.get("day_index") or 0)
+    plan = _hb_game_plan_for_day_index(day_index)
+    return {
+        "date": str(ev.get("date") or now.date().isoformat()),
+        "day_index": day_index,
+        "title": str(plan.get("title") or "遊戲大廳"),
+        "path": str(plan.get("path") or "/games"),
+    }
+
+def scheduled_hb_daily_game_push():
+    try:
+        if not _hb_daily_game_push_enabled():
+            return
+        now = _tz_now()
+        hh, mm = _hb_daily_game_push_hm()
+        if now.hour != hh or now.minute != mm:
+            return
+
+        today_game = _hb_today_game(now)
+        if not today_game:
+            return
+
+        send_key = today_game["date"]
+        if send_key in _hb_daily_game_sent_keys():
+            return
+
+        base_url = get_public_base_url()
+        game_url = f"{base_url}{today_game['path']}" if base_url else today_game["path"]
+        msg = (
+            f"🕛 今日遊戲時間到（Day {today_game['day_index']}）\n"
+            f"今天請先玩：{today_game['title']}\n"
+            f"{game_url}\n\n"
+            "通關後，回 LINE 輸入「抽紅包」即可領取今日紅包。"
+        )
+        targets = [x for x in _get_role_ids("girlfriend") if (x or "").strip()]
+        if not targets:
+            print("[SCHED][HB_GAME] no girlfriend targets.", flush=True)
+            return
+        for uid in sorted(set(targets)):
+            push_and_log(uid, msg, reason="HB_DAILY_GAME_PUSH", target_role="girlfriend")
+        _hb_daily_game_mark_sent(send_key)
+        print(f"[SCHED][HB_GAME] pushed day={today_game['day_index']} date={today_game['date']}", flush=True)
+    except Exception as e:
+        print("[SCHED][HB_GAME] error:", e, flush=True)
+
 def _hb_rule_message_text(base_url: str | None = None) -> str:
     start = HB_EVENT_DAYS[0]["date"] if HB_EVENT_DAYS else "-"
     end = HB_EVENT_DAYS[-1]["date"] if HB_EVENT_DAYS else "-"
@@ -2688,6 +2784,20 @@ def handle_command(user_id: str, text: str) -> str:
             return f"今天是 Day {int(ev['day_index'])}（{now}）\n固定紅包：NT$ {int(amount)}｜{ev.get('title') or ''}"
         return _hb_rule_message_text(base_url=get_public_base_url())
 
+    if cmd == "今日遊戲":
+        today_game = _hb_today_game(_tz_now())
+        if not today_game:
+            start = HB_EVENT_DAYS[0]["date"] if HB_EVENT_DAYS else "-"
+            end = HB_EVENT_DAYS[-1]["date"] if HB_EVENT_DAYS else "-"
+            return f"今天不在活動期間。\n活動日期：{start} ~ {end}"
+        base_url = get_public_base_url()
+        game_url = f"{base_url}{today_game['path']}" if base_url else today_game["path"]
+        return (
+            f"今日遊戲（Day {today_game['day_index']}）：{today_game['title']}\n"
+            f"{game_url}\n"
+            "通關後再輸入「抽紅包」。"
+        )
+
     if text.strip() in ("\u7d05\u5305\u6e2c\u8a66", "/test") or cmd_l in ("hbtest", "redtest"):
         return "紅包改為 LINE 內抽取，不再使用 /test。請輸入「紅包」或「抽紅包」。"
 
@@ -3453,6 +3563,19 @@ def _scheduler_apply_settings(sched: BackgroundScheduler):
         )
     except Exception as e:
         print("[SCHED][VALENTINE] add_job error:", e, flush=True)
+
+    # ===== red-packet daily game push scan (every minute; fixed HH:MM by settings) =====
+    _scheduler_remove_if_exists(sched, "hb_daily_game_push")
+    try:
+        sched.add_job(
+            scheduled_hb_daily_game_push,
+            "interval",
+            minutes=1,
+            id="hb_daily_game_push",
+            replace_existing=True,
+        )
+    except Exception as e:
+        print("[SCHED][HB_GAME] add_job error:", e, flush=True)
 
 
 def refresh_scheduler_jobs():
@@ -5590,6 +5713,21 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
       </div>
 
       <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
+        <div class="text-lg font-semibold">紅包每日遊戲推播</div>
+        <div class="mt-1 text-sm text-slate-600">活動期間固定時間推播「當天遊戲連結」給女方，通關後再回 LINE 輸入「抽紅包」。</div>
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label class="flex items-center gap-2">
+            <input type="checkbox" name="hb_daily_game_push_enabled" value="1" {% if hb_daily_game_push_enabled %}checked{% endif %} />
+            <span>啟用每日遊戲推播（女方）</span>
+          </label>
+          <label class="block">
+            <div class="text-sm text-slate-600">推播時間（HH:MM）</div>
+            <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="hb_daily_game_push_time" value="{{ hb_daily_game_push_time }}" placeholder="12:00" />
+          </label>
+        </div>
+      </div>
+
+      <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
         <div class="text-lg font-semibold">紅包規則文案（LINE：紅包規則）</div>
         <div class="mt-1 text-sm text-slate-600">可直接調整要發給女方的規則內容。活動日期與每日金額表會由系統自動附上。</div>
         <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -7371,6 +7509,8 @@ def dash_settings():
             _set("valentine_target_role", (request.form.get("valentine_target_role") or "girlfriend").strip().lower())
             _set("valentine_date", (request.form.get("valentine_date") or _valentine_default_date()).strip())
             _set("valentine_messages", (request.form.get("valentine_messages") or "").strip())
+            _set("hb_daily_game_push_enabled", "1" if request.form.get("hb_daily_game_push_enabled") else "0")
+            _set("hb_daily_game_push_time", (request.form.get("hb_daily_game_push_time") or "12:00").strip())
 
             # hongbao rules copy
             for k in (
@@ -7452,6 +7592,8 @@ def dash_settings():
         "valentine_target_role": _valentine_target_role(),
         "valentine_date": _valentine_scheduled_date().isoformat(),
         "valentine_messages": _valentine_messages_text_setting(),
+        "hb_daily_game_push_enabled": _hb_daily_game_push_enabled(),
+        "hb_daily_game_push_time": f"{_hb_daily_game_push_hm()[0]:02d}:{_hb_daily_game_push_hm()[1]:02d}",
         "hb_rule_title": _hb_rule_title(),
         "hb_rule_intro": _hb_rule_intro(),
         "hb_rule_eligibility": _hb_rule_eligibility(),
