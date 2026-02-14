@@ -66,6 +66,9 @@ from db_love import (
     get_media_record,
     # NEW
     mark_message_processed,
+    upsert_valentine_delivery_log,
+    list_valentine_delivery_logs,
+    ack_latest_valentine_delivery_for_user,
     create_dashboard_magic_token,
     consume_dashboard_magic_token,
     # conflict repair workflow
@@ -1076,6 +1079,56 @@ def _valentine_slot_index(now: datetime.datetime, base_date: datetime.date, mess
             return idx
     return None
 
+
+def _valentine_ack_notify_enabled() -> bool:
+    return _get_bool_setting_global("valentine_ack_notify_enabled", True)
+
+
+def _is_valentine_ack_text(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    aliases = {
+        "已收到",
+        "收到",
+        "收到了",
+        "看到了",
+        "ok收到",
+        "ok 收到",
+    }
+    return t in aliases
+
+
+def _try_handle_valentine_ack(user_id: str, text: str) -> str | None:
+    if not _is_valentine_ack_text(text):
+        return None
+
+    row = ack_latest_valentine_delivery_for_user(
+        db_path=LOVE_DB_PATH,
+        target_user_id=user_id,
+        ack_text=text,
+        acked_at=_tz_now().isoformat(timespec="seconds"),
+    )
+    if not row:
+        return None
+
+    target_role = (row.get("target_role") or "").strip().lower()
+    notify_role = "boyfriend" if target_role == "girlfriend" else ("girlfriend" if target_role == "boyfriend" else "")
+    sender_name = _safe_name(user_id) or ("Girlfriend" if target_role == "girlfriend" else "Boyfriend")
+    acked_at = (row.get("acked_at") or "")[:16].replace("T", " ")
+
+    if notify_role and _valentine_ack_notify_enabled():
+        try:
+            push_to_roles_text(
+                (notify_role,),
+                f"✅ {sender_name} 已確認收到情人節訊息（{acked_at}）。",
+                reason="VALENTINE_ACK_NOTIFY",
+            )
+        except Exception as e:
+            logger.error("[VALENTINE][ACK_NOTIFY][FAILED] role=%s err=%s", notify_role, str(e))
+
+    return "收到，我已幫你標記『已收到』。"
+
 def scheduled_valentine_surprise():
     try:
         if not _valentine_enabled():
@@ -1100,10 +1153,44 @@ def scheduled_valentine_surprise():
         if not targets:
             print(f"[SCHED][VALENTINE] no targets for role={role}", flush=True)
             return
+        scheduled_for = now.replace(minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
+        pushed_ok = 0
+        pushed_fail = 0
         for uid in sorted(set(targets)):
-            push_and_log(uid, msg, reason="VALENTINE_SURPRISE", target_role=role)
-        _valentine_mark_sent(send_key)
-        print(f"[SCHED][VALENTINE] pushed slot={idx} role={role}", flush=True)
+            try:
+                push_and_log(uid, msg, reason="VALENTINE_SURPRISE", target_role=role)
+                upsert_valentine_delivery_log(
+                    db_path=LOVE_DB_PATH,
+                    send_key=send_key,
+                    valentine_date=base_date.isoformat(),
+                    slot_index=idx,
+                    target_user_id=uid,
+                    target_role=role,
+                    message_text=msg,
+                    scheduled_for=scheduled_for,
+                    push_status="accepted",
+                    push_error=None,
+                    pushed_at=now.isoformat(timespec="seconds"),
+                )
+                pushed_ok += 1
+            except Exception as e:
+                upsert_valentine_delivery_log(
+                    db_path=LOVE_DB_PATH,
+                    send_key=send_key,
+                    valentine_date=base_date.isoformat(),
+                    slot_index=idx,
+                    target_user_id=uid,
+                    target_role=role,
+                    message_text=msg,
+                    scheduled_for=scheduled_for,
+                    push_status="failed",
+                    push_error=str(e),
+                    pushed_at=now.isoformat(timespec="seconds"),
+                )
+                pushed_fail += 1
+        if pushed_ok > 0:
+            _valentine_mark_sent(send_key)
+        print(f"[SCHED][VALENTINE] slot={idx} role={role} ok={pushed_ok} fail={pushed_fail}", flush=True)
     except Exception as e:
         print("[SCHED][VALENTINE] error:", e, flush=True)
 
@@ -2652,6 +2739,14 @@ def forward_image_to_other_party(sender_user_id: str, sender_name: str, message_
 
 # ====== command handler ======
 def handle_command(user_id: str, text: str) -> str:
+    # valentine delivery ack
+    try:
+        ack_msg = _try_handle_valentine_ack(user_id, text)
+        if ack_msg:
+            return ack_msg
+    except Exception as e:
+        logger.error("[VALENTINE][ACK] error=%s", str(e))
+
     # ===== medication: pill confirmation from girlfriend =====
     try:
         role = get_user_role(db_path=LOVE_DB_PATH, user_id=user_id)
@@ -5709,6 +5804,56 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
             <div class="text-sm text-slate-600">每行一則（第 1 行 = 08:00，第 2 行 = 09:00 ...；若有第 17 行，會在隔天 00:00 發送）</div>
             <textarea class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="valentine_messages" rows="12" placeholder="每行一則訊息">{{ valentine_messages }}</textarea>
           </label>
+
+          <label class="flex items-center gap-2 md:col-span-2">
+            <input type="checkbox" name="valentine_ack_notify_enabled" value="1" {% if valentine_ack_notify_enabled %}checked{% endif %} />
+            <span>女方回覆「已收到」時，通知男方（或反向通知）</span>
+          </label>
+        </div>
+
+        <div class="mt-4 border border-slate-200 rounded-xl p-3">
+          <div class="text-sm font-semibold">情話送達紀錄（{{ valentine_date }}）</div>
+          <div class="mt-1 text-xs text-slate-500">LINE 沒有已讀 API。這裡的「已收到」來自對方主動回覆關鍵字（例如：已收到）。</div>
+          {% if valentine_logs %}
+            <div class="mt-3 overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead class="text-left text-slate-500">
+                  <tr>
+                    <th class="py-2 pr-4">時段</th>
+                    <th class="py-2 pr-4">推播</th>
+                    <th class="py-2 pr-4">已收到</th>
+                    <th class="py-2 pr-4">內容</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y">
+                  {% for r in valentine_logs %}
+                    <tr>
+                      <td class="py-2 pr-4">#{{ r.slot_index + 1 }} · {{ (r.scheduled_for or "")[:16]|replace("T"," ") }}</td>
+                      <td class="py-2 pr-4">
+                        {% if r.push_ok %}
+                          <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">成功</span>
+                        {% else %}
+                          <span class="inline-flex items-center rounded-full bg-rose-50 px-3 py-1 text-rose-900">失敗</span>
+                          {% if r.push_error %}<div class="mt-1 text-xs text-rose-900">{{ r.push_error }}</div>{% endif %}
+                        {% endif %}
+                      </td>
+                      <td class="py-2 pr-4">
+                        {% if r.acked %}
+                          <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">是</span>
+                          <div class="mt-1 text-xs text-slate-600">{{ (r.acked_at or "")[:16]|replace("T"," ") }}</div>
+                        {% else %}
+                          <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-slate-700">否</span>
+                        {% endif %}
+                      </td>
+                      <td class="py-2 pr-4">{{ r.message_text }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <div class="mt-2 text-sm text-slate-600">目前還沒有送達紀錄。</div>
+          {% endif %}
         </div>
       </div>
 
@@ -7524,6 +7669,7 @@ def dash_settings():
                 "hb_rule_postscript",
             ):
                 _set(k, (request.form.get(k) or "").strip())
+            _set("valentine_ack_notify_enabled", "1" if request.form.get("valentine_ack_notify_enabled") else "0")
 
             refresh_scheduler_jobs()
             status = "已儲存並套用。"
@@ -7554,6 +7700,28 @@ def dash_settings():
     # weather view values
     v_times = _get_setting_global("weather_remind_times")
     weather_times = (v_times if (v_times is not None and v_times.strip() != "") else "08:30,12:30,17:30")
+    valentine_date_text = _valentine_scheduled_date().isoformat()
+    valentine_logs_raw = list_valentine_delivery_logs(
+        db_path=LOVE_DB_PATH,
+        valentine_date=valentine_date_text,
+        limit=80,
+    )
+    valentine_logs = []
+    for row in valentine_logs_raw:
+        push_status = (row.get("push_status") or "").strip().lower()
+        valentine_logs.append(
+            {
+                "slot_index": int(row.get("slot_index") or 0),
+                "scheduled_for": row.get("scheduled_for") or "",
+                "target_role": row.get("target_role") or "",
+                "push_status": push_status,
+                "push_ok": push_status == "accepted",
+                "push_error": row.get("push_error") or "",
+                "message_text": row.get("message_text") or "",
+                "acked_at": row.get("acked_at") or "",
+                "acked": bool((row.get("acked_at") or "").strip()),
+            }
+        )
     data = {
         "bot_name": BOT_NAME,
         "base_url": base_url,
@@ -7590,7 +7758,7 @@ def dash_settings():
         "role_label_boyfriend": bf_label,
         "valentine_enabled": _valentine_enabled(),
         "valentine_target_role": _valentine_target_role(),
-        "valentine_date": _valentine_scheduled_date().isoformat(),
+        "valentine_date": valentine_date_text,
         "valentine_messages": _valentine_messages_text_setting(),
         "hb_daily_game_push_enabled": _hb_daily_game_push_enabled(),
         "hb_daily_game_push_time": f"{_hb_daily_game_push_hm()[0]:02d}:{_hb_daily_game_push_hm()[1]:02d}",
@@ -7602,6 +7770,8 @@ def dash_settings():
         "hb_rule_amount": _hb_rule_amount(),
         "hb_rule_query_help": _hb_rule_query_help(),
         "hb_rule_postscript": _hb_rule_postscript(),
+        "valentine_ack_notify_enabled": _valentine_ack_notify_enabled(),
+        "valentine_logs": valentine_logs,
     }
     return render_template_string(DASH_SETTINGS_TEMPLATE, **data)
 

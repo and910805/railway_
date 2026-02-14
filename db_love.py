@@ -227,6 +227,33 @@ def seed_defaults(db_path: str = DEFAULT_DB):
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_processed_messages_user ON processed_messages(user_id);")
+
+    # valentine surprise delivery/ack logs
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS valentine_delivery_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            send_key TEXT NOT NULL,
+            valentine_date TEXT NOT NULL,
+            slot_index INTEGER NOT NULL,
+            target_user_id TEXT NOT NULL,
+            target_role TEXT NOT NULL,
+            message_text TEXT NOT NULL,
+            scheduled_for TEXT,
+            push_status TEXT NOT NULL,
+            push_error TEXT,
+            pushed_at TEXT NOT NULL,
+            acked_at TEXT,
+            ack_text TEXT,
+            ack_source_user_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(send_key, target_user_id)
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_valentine_logs_user ON valentine_delivery_logs(target_user_id, pushed_at DESC);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_valentine_logs_date ON valentine_delivery_logs(valentine_date, slot_index);")
     
     # medication: daily pill reminder log/state
     cur.execute(
@@ -582,6 +609,152 @@ def mark_message_processed(db_path: str, message_id: str, user_id: str, msg_type
         )
         conn.commit()
         return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
+def upsert_valentine_delivery_log(
+    db_path: str,
+    send_key: str,
+    valentine_date: str,
+    slot_index: int,
+    target_user_id: str,
+    target_role: str,
+    message_text: str,
+    scheduled_for: str | None,
+    push_status: str,
+    push_error: str | None = None,
+    pushed_at: str | None = None,
+):
+    now_iso = _tz_now_iso()
+    pushed_at = (pushed_at or "").strip() or now_iso
+    conn = _conn(db_path)
+    try:
+        _execute(
+            conn,
+            """
+            INSERT INTO valentine_delivery_logs(
+                send_key, valentine_date, slot_index, target_user_id, target_role,
+                message_text, scheduled_for, push_status, push_error, pushed_at, created_at, updated_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(send_key, target_user_id) DO UPDATE SET
+                valentine_date=excluded.valentine_date,
+                slot_index=excluded.slot_index,
+                target_role=excluded.target_role,
+                message_text=excluded.message_text,
+                scheduled_for=excluded.scheduled_for,
+                push_status=excluded.push_status,
+                push_error=excluded.push_error,
+                pushed_at=excluded.pushed_at,
+                updated_at=excluded.updated_at
+            """,
+            (
+                str(send_key),
+                str(valentine_date),
+                int(slot_index),
+                str(target_user_id),
+                str(target_role),
+                str(message_text),
+                (scheduled_for or None),
+                str(push_status),
+                (push_error or None),
+                str(pushed_at),
+                now_iso,
+                now_iso,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_valentine_delivery_logs(db_path: str, valentine_date: str | None = None, limit: int = 80) -> list[dict]:
+    limit = max(1, min(500, int(limit)))
+    conn = _conn(db_path)
+    try:
+        if valentine_date and str(valentine_date).strip():
+            rows = conn.execute(
+                """
+                SELECT id, send_key, valentine_date, slot_index, target_user_id, target_role,
+                       message_text, scheduled_for, push_status, push_error, pushed_at,
+                       acked_at, ack_text, ack_source_user_id
+                FROM valentine_delivery_logs
+                WHERE valentine_date=?
+                ORDER BY slot_index DESC, id DESC
+                LIMIT ?
+                """,
+                (str(valentine_date).strip(), limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, send_key, valentine_date, slot_index, target_user_id, target_role,
+                       message_text, scheduled_for, push_status, push_error, pushed_at,
+                       acked_at, ack_text, ack_source_user_id
+                FROM valentine_delivery_logs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def ack_latest_valentine_delivery_for_user(
+    db_path: str,
+    target_user_id: str,
+    ack_text: str,
+    acked_at: str | None = None,
+) -> Optional[dict]:
+    uid = (target_user_id or "").strip()
+    if not uid:
+        return None
+    now_iso = (acked_at or "").strip() or _tz_now_iso()
+    conn = _conn(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT id, send_key, valentine_date, slot_index, target_user_id, target_role,
+                   message_text, scheduled_for, push_status, push_error, pushed_at,
+                   acked_at, ack_text, ack_source_user_id
+            FROM valentine_delivery_logs
+            WHERE target_user_id=?
+              AND push_status='accepted'
+              AND (acked_at IS NULL OR acked_at='')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (uid,),
+        ).fetchone()
+        if not row:
+            return None
+
+        row_id = int(row["id"])
+        _execute(
+            conn,
+            """
+            UPDATE valentine_delivery_logs
+            SET acked_at=?, ack_text=?, ack_source_user_id=?, updated_at=?
+            WHERE id=?
+            """,
+            (now_iso, str(ack_text or ""), uid, now_iso, row_id),
+        )
+        conn.commit()
+
+        updated = conn.execute(
+            """
+            SELECT id, send_key, valentine_date, slot_index, target_user_id, target_role,
+                   message_text, scheduled_for, push_status, push_error, pushed_at,
+                   acked_at, ack_text, ack_source_user_id
+            FROM valentine_delivery_logs
+            WHERE id=?
+            """,
+            (row_id,),
+        ).fetchone()
+        return dict(updated) if updated else None
     finally:
         conn.close()
 
