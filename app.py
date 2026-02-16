@@ -3739,6 +3739,7 @@ GAMES_TEMPLATE = """<!doctype html>
     <div class="card"><h2>🗂️ 默契排序</h2><p>把 6 個事件排成正確時間線。</p><a class="btn" href="/games/timeline">開始排序</a></div>
     <div class="card"><h2>🔤 關鍵字接龍</h2><p>連續輸入 5 個不重複關鍵字，完成接龍。</p><a class="btn" href="/games/word-chain">開始接龍</a></div>
     <div class="card"><h2>🔐 表情密碼</h2><p>看 emoji 猜意思，5 題答對 4 題過關。</p><a class="btn" href="/games/emoji-code">開始破譯</a></div>
+    <div class="card"><h2>🔢 9x9 數獨挑戰</h2><p>每次重整都會隨機新題，初始每宮 4 格，提示最多 3 次。</p><a class="btn" href="/games/sudoku">開始解題</a></div>
     <div class="card"><h2>📸 每日拍照任務</h2><p>每天主題 + 姿勢 + 場景條件，交照片等審核。</p><a class="btn" href="/games/photo-mission">開始任務</a></div>
   </div>
 </body>
@@ -3987,6 +3988,303 @@ ul{padding-left:20px;}
     input.value = "";
     paint();
   });
+})();
+</script></body></html>"""
+
+GAME_SUDOKU_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{{ bot_name }}｜9x9 數獨挑戰</title>
+<style>
+body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
+.wrap{max-width:900px;margin:0 auto;padding:22px 16px 36px;}
+.card{background:#fff;border:1px solid #cbd5e1;border-radius:16px;padding:16px;}
+.muted{color:#475569;font-size:14px;}
+.status{min-height:24px;font-weight:700;}
+.ok{color:#0f766e;}.fail{color:#b91c1c;}
+.board{
+  margin-top:12px;
+  display:grid;
+  grid-template-columns:repeat(9,minmax(0,1fr));
+  max-width:560px;
+  width:100%;
+  border:2px solid #0f172a;
+  background:#fff;
+}
+.cell{
+  width:100%;
+  aspect-ratio:1/1;
+  border:1px solid #cbd5e1;
+  text-align:center;
+  font-size:clamp(17px,2.5vw,26px);
+  font-weight:700;
+  color:#0f172a;
+}
+.cell:focus{outline:none;background:#dbeafe;}
+.cell.given{background:#e2e8f0;color:#0f172a;}
+.cell.hinted{background:#dcfce7;color:#166534;}
+.cell.conflict{background:#fee2e2;color:#991b1b;}
+.cell.br{border-right:2px solid #0f172a;}
+.cell.bb{border-bottom:2px solid #0f172a;}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;}
+.btn{padding:9px 12px;border-radius:10px;border:1px solid #334155;background:#fff;color:#0f172a;cursor:pointer;font-weight:700;}
+.btn.primary{background:#0f172a;color:#fff;}
+.btn[disabled]{opacity:.45;cursor:not-allowed;}
+@media (max-width: 640px){
+  .wrap{padding:16px 12px 28px;}
+}
+</style></head>
+<body><div class="wrap"><div class="card">
+<h1>🔢 9x9 數獨挑戰</h1>
+<p class="muted">每次重整都會隨機新題。難度偏高：每個 3x3 宮一開始只給 4 格。提示最多 3 次，每次會補 1 格正確數字。</p>
+<div class="muted">剩餘提示：<strong id="hintLeft">3</strong> 次</div>
+<div id="board" class="board" aria-label="sudoku-board"></div>
+<div class="toolbar">
+  <button id="checkBtn" class="btn primary" type="button">檢查答案</button>
+  <button id="hintBtn" class="btn" type="button">提示 +1 格</button>
+  <button id="resetBtn" class="btn" type="button">重置本題</button>
+  <button id="newBtn" class="btn" type="button">新題目</button>
+</div>
+<p id="status" class="status"></p>
+<p><a href="/games">回遊戲大廳</a></p>
+</div></div>
+<script>
+(() => {
+  const SIZE = 9;
+  const BOX = 3;
+  const MAX_HINTS = 3;
+
+  const boardEl = document.getElementById("board");
+  const hintLeftEl = document.getElementById("hintLeft");
+  const hintBtn = document.getElementById("hintBtn");
+  const checkBtn = document.getElementById("checkBtn");
+  const resetBtn = document.getElementById("resetBtn");
+  const newBtn = document.getElementById("newBtn");
+  const statusEl = document.getElementById("status");
+
+  let solution = [];
+  let puzzle = [];
+  let current = [];
+  let given = [];
+  let hinted = [];
+  let hintsUsed = 0;
+
+  function range(n){ return Array.from({length:n}, (_,i) => i); }
+  function cloneGrid(g){ return g.map((row) => row.slice()); }
+  function key(r,c){ return r + "-" + c; }
+  function shuffle(arr){
+    const out = arr.slice();
+    for(let i = out.length - 1; i > 0; i--){
+      const j = Math.floor(Math.random() * (i + 1));
+      const t = out[i]; out[i] = out[j]; out[j] = t;
+    }
+    return out;
+  }
+  function buildSolvedGrid(){
+    const pattern = (r, c) => (BOX * (r % BOX) + Math.floor(r / BOX) + c) % SIZE;
+    const rows = shuffle(range(BOX)).flatMap((g) => shuffle(range(BOX)).map((r) => g * BOX + r));
+    const cols = shuffle(range(BOX)).flatMap((g) => shuffle(range(BOX)).map((c) => g * BOX + c));
+    const nums = shuffle(range(SIZE).map((x) => x + 1));
+    return rows.map((r) => cols.map((c) => nums[pattern(r, c)]));
+  }
+  function makePuzzleFromSolution(sol){
+    const pz = cloneGrid(sol);
+    for(let br = 0; br < BOX; br++){
+      for(let bc = 0; bc < BOX; bc++){
+        const cells = [];
+        for(let r = br * BOX; r < br * BOX + BOX; r++){
+          for(let c = bc * BOX; c < bc * BOX + BOX; c++){
+            cells.push([r, c]);
+          }
+        }
+        const keep = new Set(shuffle(cells).slice(0, 4).map(([r, c]) => key(r, c)));
+        for(const [r, c] of cells){
+          if(!keep.has(key(r, c))) pz[r][c] = 0;
+        }
+      }
+    }
+    return pz;
+  }
+  function sanitizeToDigit(v){
+    const s = String(v || "").replace(/[^1-9]/g, "");
+    return s ? Number(s[0]) : 0;
+  }
+  function setStatus(text, ok){
+    statusEl.textContent = text || "";
+    statusEl.className = "status " + (ok === true ? "ok" : ok === false ? "fail" : "");
+  }
+  function updateHintState(){
+    const left = Math.max(0, MAX_HINTS - hintsUsed);
+    hintLeftEl.textContent = String(left);
+    hintBtn.disabled = left <= 0;
+  }
+  function conflictKeys(){
+    const bad = new Set();
+    const markDup = (items) => {
+      const seen = new Map();
+      items.forEach(([r, c, v]) => {
+        if(!v) return;
+        const list = seen.get(v) || [];
+        list.push([r, c]);
+        seen.set(v, list);
+      });
+      seen.forEach((list) => {
+        if(list.length > 1){
+          list.forEach(([r, c]) => bad.add(key(r, c)));
+        }
+      });
+    };
+    for(let r = 0; r < SIZE; r++){
+      markDup(range(SIZE).map((c) => [r, c, current[r][c]]));
+    }
+    for(let c = 0; c < SIZE; c++){
+      markDup(range(SIZE).map((r) => [r, c, current[r][c]]));
+    }
+    for(let br = 0; br < BOX; br++){
+      for(let bc = 0; bc < BOX; bc++){
+        const items = [];
+        for(let r = br * BOX; r < br * BOX + BOX; r++){
+          for(let c = bc * BOX; c < bc * BOX + BOX; c++){
+            items.push([r, c, current[r][c]]);
+          }
+        }
+        markDup(items);
+      }
+    }
+    return bad;
+  }
+  function paintConflicts(){
+    const bad = conflictKeys();
+    const cells = boardEl.querySelectorAll(".cell");
+    cells.forEach((el) => {
+      const r = Number(el.dataset.r || "0");
+      const c = Number(el.dataset.c || "0");
+      el.classList.toggle("conflict", bad.has(key(r, c)));
+    });
+    return bad.size;
+  }
+  function renderBoard(){
+    boardEl.innerHTML = "";
+    for(let r = 0; r < SIZE; r++){
+      for(let c = 0; c < SIZE; c++){
+        const inp = document.createElement("input");
+        inp.type = "text";
+        inp.inputMode = "numeric";
+        inp.maxLength = 1;
+        inp.autocomplete = "off";
+        inp.className = "cell";
+        inp.dataset.r = String(r);
+        inp.dataset.c = String(c);
+        if((c + 1) % BOX === 0 && c < SIZE - 1) inp.classList.add("br");
+        if((r + 1) % BOX === 0 && r < SIZE - 1) inp.classList.add("bb");
+
+        const val = current[r][c];
+        inp.value = val ? String(val) : "";
+
+        if(given[r][c]){
+          inp.readOnly = true;
+          inp.classList.add("given");
+          if(hinted[r][c]) inp.classList.add("hinted");
+        } else {
+          inp.addEventListener("input", (ev) => {
+            const next = sanitizeToDigit(ev.target.value);
+            current[r][c] = next;
+            ev.target.value = next ? String(next) : "";
+            paintConflicts();
+          });
+        }
+        boardEl.appendChild(inp);
+      }
+    }
+    paintConflicts();
+  }
+  function checkSolved(){
+    for(let r = 0; r < SIZE; r++){
+      for(let c = 0; c < SIZE; c++){
+        if(current[r][c] !== solution[r][c]) return false;
+      }
+    }
+    return true;
+  }
+  function pickHintCell(){
+    const candidates = [];
+    for(let r = 0; r < SIZE; r++){
+      for(let c = 0; c < SIZE; c++){
+        if(given[r][c]) continue;
+        if(current[r][c] !== solution[r][c]) candidates.push([r, c]);
+      }
+    }
+    if(!candidates.length) return null;
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  }
+  function newGame(){
+    solution = buildSolvedGrid();
+    puzzle = makePuzzleFromSolution(solution);
+    current = cloneGrid(puzzle);
+    given = puzzle.map((row) => row.map((v) => v > 0));
+    hinted = puzzle.map((row) => row.map(() => false));
+    hintsUsed = 0;
+    updateHintState();
+    setStatus("新題已生成，開始挑戰。", null);
+    renderBoard();
+  }
+  function resetPuzzle(){
+    current = cloneGrid(puzzle);
+    given = puzzle.map((row) => row.map((v) => v > 0));
+    hinted = puzzle.map((row) => row.map(() => false));
+    hintsUsed = 0;
+    updateHintState();
+    setStatus("已重置到本題初始狀態。", null);
+    renderBoard();
+  }
+  function useHint(){
+    if(hintsUsed >= MAX_HINTS){
+      setStatus("提示次數已用完。", false);
+      return;
+    }
+    const cell = pickHintCell();
+    if(!cell){
+      setStatus("目前沒有可提示的格子。", true);
+      return;
+    }
+    const [r, c] = cell;
+    current[r][c] = solution[r][c];
+    given[r][c] = true;
+    hinted[r][c] = true;
+    hintsUsed += 1;
+    updateHintState();
+    renderBoard();
+    setStatus("提示：第 " + (r + 1) + " 列，第 " + (c + 1) + " 欄 = " + solution[r][c], true);
+    if(checkSolved()){
+      setStatus("過關！你已完成這題數獨。", true);
+    }
+  }
+  function checkBoard(){
+    const conflicts = paintConflicts();
+    let wrong = 0;
+    let empty = 0;
+    for(let r = 0; r < SIZE; r++){
+      for(let c = 0; c < SIZE; c++){
+        if(!current[r][c]) empty += 1;
+        else if(current[r][c] !== solution[r][c]) wrong += 1;
+      }
+    }
+    if(conflicts > 0){
+      setStatus("目前有重複衝突格，請先修正。", false);
+      return;
+    }
+    if(wrong === 0 && empty === 0){
+      setStatus("過關！你已完成這題數獨。", true);
+    } else {
+      setStatus("尚未完成：空格 " + empty + " 格，錯誤 " + wrong + " 格。", false);
+    }
+  }
+
+  hintBtn.addEventListener("click", useHint);
+  checkBtn.addEventListener("click", checkBoard);
+  resetBtn.addEventListener("click", resetPuzzle);
+  newBtn.addEventListener("click", newGame);
+
+  newGame();
 })();
 </script></body></html>"""
 
@@ -4500,6 +4798,11 @@ def games_timeline():
 @app.route("/games/word-chain")
 def games_word_chain():
     return render_template_string(GAME_WORD_CHAIN_TEMPLATE, bot_name=BOT_NAME)
+
+
+@app.route("/games/sudoku")
+def games_sudoku():
+    return render_template_string(GAME_SUDOKU_TEMPLATE, bot_name=BOT_NAME)
 
 
 @app.route("/games/emoji-code", methods=["GET", "POST"])
