@@ -3995,29 +3995,46 @@ GAME_SUDOKU_TEMPLATE = """<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>{{ bot_name }}｜9x9 數獨挑戰</title>
 <style>
+*{box-sizing:border-box;}
 body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans TC";}
 .wrap{max-width:900px;margin:0 auto;padding:22px 16px 36px;}
-.card{background:#fff;border:1px solid #cbd5e1;border-radius:16px;padding:16px;}
+.card{background:#fff;border:1px solid #cbd5e1;border-radius:16px;padding:16px;box-shadow:0 8px 28px rgba(15,23,42,.08);}
 .muted{color:#475569;font-size:14px;}
 .status{min-height:24px;font-weight:700;}
 .ok{color:#0f766e;}.fail{color:#b91c1c;}
-.board{
+.boardWrap{
   margin-top:12px;
+  width:100%;
+  max-width:580px;
+  padding:10px;
+  border:1px solid #cbd5e1;
+  border-radius:14px;
+  background:#f8fafc;
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+}
+.board{
+  margin:0 auto;
   display:grid;
   grid-template-columns:repeat(9,minmax(0,1fr));
-  max-width:560px;
-  width:100%;
+  width:min(100%,560px);
+  min-width:0;
   border:2px solid #0f172a;
   background:#fff;
 }
 .cell{
   width:100%;
+  min-width:0;
   aspect-ratio:1/1;
+  margin:0;
+  padding:0;
   border:1px solid #cbd5e1;
   text-align:center;
-  font-size:clamp(17px,2.5vw,26px);
+  font-size:clamp(16px,4.2vw,24px);
+  line-height:1;
   font-weight:700;
   color:#0f172a;
+  border-radius:0;
 }
 .cell:focus{outline:none;background:#dbeafe;}
 .cell.given{background:#e2e8f0;color:#0f172a;}
@@ -4025,19 +4042,31 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
 .cell.conflict{background:#fee2e2;color:#991b1b;}
 .cell.br{border-right:2px solid #0f172a;}
 .cell.bb{border-bottom:2px solid #0f172a;}
-.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;}
-.btn{padding:9px 12px;border-radius:10px;border:1px solid #334155;background:#fff;color:#0f172a;cursor:pointer;font-weight:700;}
+.toolbar{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:8px;
+  margin-top:14px;
+  width:100%;
+  max-width:580px;
+}
+.btn{padding:10px 12px;border-radius:10px;border:1px solid #334155;background:#fff;color:#0f172a;cursor:pointer;font-weight:700;width:100%;text-align:center;}
 .btn.primary{background:#0f172a;color:#fff;}
 .btn[disabled]{opacity:.45;cursor:not-allowed;}
 @media (max-width: 640px){
   .wrap{padding:16px 12px 28px;}
+  .card{padding:12px;}
+  .toolbar{grid-template-columns:1fr;}
+  .muted{font-size:13px;}
 }
 </style></head>
 <body><div class="wrap"><div class="card">
 <h1>🔢 9x9 數獨挑戰</h1>
 <p class="muted">每次重整都會隨機新題。難度偏高：每個 3x3 宮一開始只給 4 格。提示最多 3 次，每次會補 1 格正確數字。</p>
 <div class="muted">剩餘提示：<strong id="hintLeft">3</strong> 次</div>
-<div id="board" class="board" aria-label="sudoku-board"></div>
+<div class="boardWrap">
+  <div id="board" class="board" aria-label="sudoku-board"></div>
+</div>
 <div class="toolbar">
   <button id="checkBtn" class="btn primary" type="button">檢查答案</button>
   <button id="hintBtn" class="btn" type="button">提示 +1 格</button>
