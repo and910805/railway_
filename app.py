@@ -4086,6 +4086,7 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
     <option value="easy">簡單</option>
     <option value="normal">普通</option>
     <option value="hard" selected>高級</option>
+    <option value="hell">地獄</option>
   </select>
   <span id="difficultyDesc" class="muted"></span>
   <span class="muted">剩餘提示：<strong id="hintLeft">3</strong> 次</span>
@@ -4110,7 +4111,8 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
   const DIFFICULTY_CONFIG = {
     easy: {label: "簡單", givenPerBox: 6},
     normal: {label: "普通", givenPerBox: 5},
-    hard: {label: "高級", givenPerBox: 4}
+    hard: {label: "高級", givenPerBox: 4},
+    hell: {label: "地獄", givenPerBox: 3}
   };
 
   const boardEl = document.getElementById("board");
