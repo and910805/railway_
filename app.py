@@ -4002,6 +4002,21 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
 .muted{color:#475569;font-size:14px;}
 .status{min-height:24px;font-weight:700;}
 .ok{color:#0f766e;}.fail{color:#b91c1c;}
+.topbar{
+  display:flex;
+  gap:10px;
+  align-items:center;
+  flex-wrap:wrap;
+  margin-top:10px;
+}
+.sel{
+  border:1px solid #334155;
+  border-radius:10px;
+  padding:8px 10px;
+  font-size:14px;
+  background:#fff;
+  color:#0f172a;
+}
 .boardWrap{
   margin-top:12px;
   width:100%;
@@ -4057,13 +4072,24 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
   .wrap{padding:16px 12px 28px;}
   .card{padding:12px;}
   .toolbar{grid-template-columns:1fr;}
+  .topbar{gap:8px;}
+  .sel{width:100%;}
   .muted{font-size:13px;}
 }
 </style></head>
 <body><div class="wrap"><div class="card">
 <h1>🔢 9x9 數獨挑戰</h1>
-<p class="muted">每次重整都會隨機新題。難度偏高：每個 3x3 宮一開始只給 4 格。提示最多 3 次，每次會補 1 格正確數字。</p>
-<div class="muted">剩餘提示：<strong id="hintLeft">3</strong> 次</div>
+<p class="muted">每次重整都會隨機新題。可切換難度：簡單 / 普通 / 高級。提示最多 3 次，每次會補 1 格正確數字。</p>
+<div class="topbar">
+  <label for="difficultySel" class="muted">難度</label>
+  <select id="difficultySel" class="sel">
+    <option value="easy">簡單</option>
+    <option value="normal">普通</option>
+    <option value="hard" selected>高級</option>
+  </select>
+  <span id="difficultyDesc" class="muted"></span>
+  <span class="muted">剩餘提示：<strong id="hintLeft">3</strong> 次</span>
+</div>
 <div class="boardWrap">
   <div id="board" class="board" aria-label="sudoku-board"></div>
 </div>
@@ -4081,9 +4107,16 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
   const SIZE = 9;
   const BOX = 3;
   const MAX_HINTS = 3;
+  const DIFFICULTY_CONFIG = {
+    easy: {label: "簡單", givenPerBox: 6},
+    normal: {label: "普通", givenPerBox: 5},
+    hard: {label: "高級", givenPerBox: 4}
+  };
 
   const boardEl = document.getElementById("board");
   const hintLeftEl = document.getElementById("hintLeft");
+  const difficultySel = document.getElementById("difficultySel");
+  const difficultyDesc = document.getElementById("difficultyDesc");
   const hintBtn = document.getElementById("hintBtn");
   const checkBtn = document.getElementById("checkBtn");
   const resetBtn = document.getElementById("resetBtn");
@@ -4108,6 +4141,15 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
     }
     return out;
   }
+  function currentDifficultyCfg(){
+    const key = String(difficultySel && difficultySel.value || "hard");
+    return DIFFICULTY_CONFIG[key] || DIFFICULTY_CONFIG.hard;
+  }
+  function updateDifficultyDesc(){
+    const cfg = currentDifficultyCfg();
+    const total = cfg.givenPerBox * 9;
+    difficultyDesc.textContent = cfg.label + "：初始約 " + total + " 格";
+  }
   function buildSolvedGrid(){
     const pattern = (r, c) => (BOX * (r % BOX) + Math.floor(r / BOX) + c) % SIZE;
     const rows = shuffle(range(BOX)).flatMap((g) => shuffle(range(BOX)).map((r) => g * BOX + r));
@@ -4115,8 +4157,9 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
     const nums = shuffle(range(SIZE).map((x) => x + 1));
     return rows.map((r) => cols.map((c) => nums[pattern(r, c)]));
   }
-  function makePuzzleFromSolution(sol){
+  function makePuzzleFromSolution(sol, givenPerBox){
     const pz = cloneGrid(sol);
+    const keepN = Math.max(1, Math.min(9, Number(givenPerBox) || 4));
     for(let br = 0; br < BOX; br++){
       for(let bc = 0; bc < BOX; bc++){
         const cells = [];
@@ -4125,7 +4168,7 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
             cells.push([r, c]);
           }
         }
-        const keep = new Set(shuffle(cells).slice(0, 4).map(([r, c]) => key(r, c)));
+        const keep = new Set(shuffle(cells).slice(0, keepN).map(([r, c]) => key(r, c)));
         for(const [r, c] of cells){
           if(!keep.has(key(r, c))) pz[r][c] = 0;
         }
@@ -4246,14 +4289,16 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
     return candidates[Math.floor(Math.random() * candidates.length)];
   }
   function newGame(){
+    const cfg = currentDifficultyCfg();
     solution = buildSolvedGrid();
-    puzzle = makePuzzleFromSolution(solution);
+    puzzle = makePuzzleFromSolution(solution, cfg.givenPerBox);
     current = cloneGrid(puzzle);
     given = puzzle.map((row) => row.map((v) => v > 0));
     hinted = puzzle.map((row) => row.map(() => false));
     hintsUsed = 0;
     updateHintState();
-    setStatus("新題已生成，開始挑戰。", null);
+    updateDifficultyDesc();
+    setStatus("新題已生成（" + cfg.label + "），開始挑戰。", null);
     renderBoard();
   }
   function resetPuzzle(){
@@ -4312,7 +4357,9 @@ body{margin:0;background:#f1f5f9;color:#0f172a;font-family:ui-sans-serif,system-
   checkBtn.addEventListener("click", checkBoard);
   resetBtn.addEventListener("click", resetPuzzle);
   newBtn.addEventListener("click", newGame);
+  difficultySel.addEventListener("change", newGame);
 
+  updateDifficultyDesc();
   newGame();
 })();
 </script></body></html>"""
