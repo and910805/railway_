@@ -5,7 +5,8 @@ One-time utility to create + upload + set default LINE rich menu.
 
 Usage (recommended: run on your local machine):
   export LINE_CHANNEL_ACCESS_TOKEN="YOUR_LONG_LIVED_TOKEN"
-  python setup_richmenu.py --image assets/richmenu_app_dark_2500x843.png
+  python assets/generate_richmenu_cards.py
+  python setup_richmenu.py --image assets/richmenu_reminders_6grid_2500x1686.png
 
 Notes:
 - Creating rich menu uses https://api.line.me
@@ -82,43 +83,47 @@ def build_bottom_bar_app_dark(
     selected: bool = True,
 ) -> Dict[str, Any]:
     """
-    Layout matches a 2500x843 image split into 5 equal buttons (500px each).
-    Actions are Message actions so you don't have to worry about URL percent-encoding.
+    2x3 card grid layout (2500x1686), matching the rebuilt reminder rich menu image.
+    Actions are message actions so you don't have to worry about URL encoding.
     """
-    h = 843
+    h = 1686
     w = 2500
-    bw = 500
+    cols = 3
+    rows = 2
+    bw = w // cols
+    bh = h // rows
 
     return {
         "size": {"width": w, "height": h},
         "selected": selected,
-        "name": "BottomBar App Dark",
+        "name": "Reminder Cards 6-grid",
         "chatBarText": chat_bar_text,
         "areas": [
-            # 1) 天氣
+            # Row 1
             {
-                "bounds": {"x": 0 * bw, "y": 0, "width": bw, "height": h},
-                "action": {"type": "message", "label": "Weather", "text": "天氣"},
+                "bounds": {"x": 0 * bw, "y": 0 * bh, "width": bw, "height": bh},
+                "action": {"type": "message", "label": "DuoDone", "text": "Duolingo已玩"},
             },
-            # 2) 吃藥（一鍵回報）
             {
-                "bounds": {"x": 1 * bw, "y": 0, "width": bw, "height": h},
-                "action": {"type": "message", "label": "Pill", "text": "吃了"},
+                "bounds": {"x": 1 * bw, "y": 0 * bh, "width": bw, "height": bh},
+                "action": {"type": "message", "label": "PillDone", "text": "吃了"},
             },
-            # 3) Duolingo help（狀態+指令提示）
             {
-                "bounds": {"x": 2 * bw, "y": 0, "width": bw, "height": h},
-                "action": {"type": "message", "label": "Duo", "text": "Duolingo狀態"},
+                "bounds": {"x": 2 * bw, "y": 0 * bh, "width": bw, "height": bh},
+                "action": {"type": "message", "label": "EggDone", "text": "小蛋回了"},
             },
-            # 4) 相簿（由 bot 回覆儀表板登入連結後導到 gallery）
+            # Row 2
             {
-                "bounds": {"x": 3 * bw, "y": 0, "width": bw, "height": h},
-                "action": {"type": "message", "label": "Gallery", "text": "相簿"},
+                "bounds": {"x": 0 * bw, "y": 1 * bh, "width": bw, "height": bh},
+                "action": {"type": "message", "label": "DuoStatus", "text": "Duolingo狀態"},
             },
-            # 5) 攝影任務
             {
-                "bounds": {"x": 4 * bw, "y": 0, "width": bw, "height": h},
-                "action": {"type": "message", "label": "PhotoTask", "text": "攝影任務"},
+                "bounds": {"x": 1 * bw, "y": 1 * bh, "width": bw, "height": bh},
+                "action": {"type": "message", "label": "EggStatus", "text": "小蛋狀態"},
+            },
+            {
+                "bounds": {"x": 2 * bw, "y": 1 * bh, "width": bw, "height": bh},
+                "action": {"type": "message", "label": "Dashboard", "text": "儀表板"},
             },
         ],
     }
@@ -128,7 +133,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--token", default=os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip(), help="Channel access token")
     ap.add_argument("--image", required=True, help="Path to rich menu image (PNG/JPG)")
-    ap.add_argument("--chatbar", default="功能", help="Chat bar text (shown above rich menu)")
+    ap.add_argument("--chatbar", default="提醒快捷", help="Chat bar text (shown above rich menu)")
     ap.add_argument("--no-selected", action="store_true", help="Create menu with selected=false")
     ap.add_argument("--no-default", action="store_true", help="Do NOT set as default rich menu")
     ap.add_argument("--clear-default-first", action="store_true", help="Clear current default rich menu first")

@@ -507,6 +507,9 @@ DUO_REMIND_EVERY_MINUTES = int(os.getenv("DUO_REMIND_EVERY_MINUTES", "10"))
 DUO_REMIND_START_HOUR = int(os.getenv("DUO_REMIND_START_HOUR", "22"))   # 22 = 10pm
 DUO_REMIND_END_HOUR = int(os.getenv("DUO_REMIND_END_HOUR", "23"))       # 23 = 11pm
 
+# Custom reminders (dashboard-configurable; fixed slots for simplicity)
+CUSTOM_REMINDER_SLOT_COUNT = max(1, min(12, int(os.getenv("CUSTOM_REMINDER_SLOT_COUNT", "6"))))
+
 # Photo task expiry minutes (for auto "交作業" matching)
 PHOTO_TASK_EXPIRE_MIN = int(os.getenv("PHOTO_TASK_EXPIRE_MIN", "180"))
 
@@ -828,6 +831,100 @@ def duo_remind_end_hour() -> int:
 def duo_done_today(now: datetime.datetime) -> bool:
     d = (_get_setting_global("duo_done_day") or "").strip()
     return d == now.date().isoformat()
+
+def xiaodan_done_today(now: datetime.datetime) -> bool:
+    d = (_get_setting_global("xiaodan_done_day") or "").strip()
+    return d == now.date().isoformat()
+
+def _custom_reminder_key(slot: int, field: str) -> str:
+    return f"custom_reminder_{int(slot)}_{field}"
+
+def _custom_reminder_sent_marker_key(slot: int, h: int, m: int) -> str:
+    return f"custom_reminder_{int(slot)}_sent_{int(h):02d}{int(m):02d}"
+
+def _custom_reminder_slot_defaults(slot: int) -> dict:
+    # Pre-fill slot 1 with the user's requested "小蛋" reminder.
+    if int(slot) == 1:
+        return {
+            "enabled": True,
+            "name": "小蛋",
+            "times": "10:00,11:00,12:00",
+            "message": "⏰ 小蛋提醒：記得回小蛋（回覆：小蛋回了）",
+        }
+    return {
+        "enabled": False,
+        "name": "",
+        "times": "",
+        "message": "",
+    }
+
+def _custom_reminder_str(slot: int, field: str, default: str = "") -> str:
+    v = _get_setting_global(_custom_reminder_key(slot, field))
+    if v is None:
+        return default
+    return str(v)
+
+def custom_reminder_rows_for_view() -> list[dict]:
+    rows: list[dict] = []
+    for slot in range(1, CUSTOM_REMINDER_SLOT_COUNT + 1):
+        d = _custom_reminder_slot_defaults(slot)
+        rows.append(
+            {
+                "idx": slot,
+                "enabled": _get_bool_setting_global(_custom_reminder_key(slot, "enabled"), bool(d["enabled"])),
+                "name": _custom_reminder_str(slot, "name", str(d["name"])),
+                "times": _custom_reminder_str(slot, "times", str(d["times"])),
+                "message": _custom_reminder_str(slot, "message", str(d["message"])),
+            }
+        )
+    return rows
+
+def _custom_reminder_rows_active() -> list[dict]:
+    out: list[dict] = []
+    for row in custom_reminder_rows_for_view():
+        times = _parse_times_csv(str(row.get("times") or ""))
+        msg = str(row.get("message") or "").strip()
+        if not row.get("enabled") or not times or not msg:
+            continue
+        r = dict(row)
+        r["times_parsed"] = times
+        r["message"] = msg
+        out.append(r)
+    return out
+
+def _custom_reminder_is_xiaodan(row: dict) -> bool:
+    name = str(row.get("name") or "").strip()
+    msg = str(row.get("message") or "").strip()
+    return ("小蛋" in name) or ("小蛋" in msg)
+
+def scheduled_custom_reminders_scan():
+    """
+    Scan custom reminders every minute and push any due reminders.
+    Uses per-slot per-time markers to avoid duplicate sends within the same minute.
+    """
+    now = _tz_now().replace(second=0, microsecond=0)
+    hhmm = (now.hour, now.minute)
+    marker_value = now.strftime("%Y-%m-%d %H:%M")
+    sent = 0
+
+    for row in _custom_reminder_rows_active():
+        if hhmm not in (row.get("times_parsed") or []):
+            continue
+        if _custom_reminder_is_xiaodan(row) and xiaodan_done_today(now):
+            continue
+
+        slot = int(row.get("idx") or 0)
+        marker_key = _custom_reminder_sent_marker_key(slot, now.hour, now.minute)
+        last_marker = (get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=marker_key) or "").strip()
+        if last_marker == marker_value:
+            continue
+
+        push_to_couple_text(str(row.get("message") or "").strip(), fallback_user_id=None)
+        set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key=marker_key, value=marker_value)
+        sent += 1
+
+    if sent:
+        print(f"[SCHED][CUSTOM] reminders pushed={sent} at {now:%H:%M}", flush=True)
 
 def _hb_rule_title() -> str:
     return _get_str_setting_global("hb_rule_title", "🧧 心動九日紅包｜完整規則（給臭寶）")
@@ -2413,10 +2510,10 @@ def build_help_flex(base_url: str, dash_login_url: str | None = None) -> dict:
     # Quick command buttons (what you asked for)
     quick_btn_rows = [
         _row(_msg_btn("天氣", "天氣", style="primary"), _msg_btn("天氣門檻", "天氣門檻")),
-        _row(_msg_btn("吃藥狀態", "吃藥狀態", style="primary"), _msg_btn("我吃了", "我吃了")),
+        _row(_msg_btn("吃藥狀態", "吃藥狀態", style="primary"), _msg_btn("吃了", "吃了")),
         _row(_msg_btn("吃藥紀錄", "吃藥紀錄 14"), _msg_btn("取消吃藥", "取消吃藥")),
         _row(_msg_btn("Duolingo狀態", "Duolingo狀態", style="primary"), _msg_btn("Duolingo已玩", "Duolingo已玩")),
-        _row(_msg_btn("Duo提醒開", "Duolingo提醒開"), _msg_btn("Duo提醒關", "Duolingo提醒關")),
+        _row(_msg_btn("Duo提醒開", "Duolingo提醒開"), _msg_btn("小蛋回了", "小蛋回了")),
         _row(_msg_btn("攝影任務", "攝影任務", style="primary"), _msg_btn("任務狀態", "任務狀態")),
     ]
 
@@ -2674,6 +2771,12 @@ def _cmd(text: str) -> tuple[str, str]:
     return cmd, arg
 
 
+def _normalize_cmd_token(s: str) -> str:
+    # Tolerate spaces / punctuation differences from LINE rich menu or manual typing.
+    t = (s or "").strip().lower()
+    return re.sub(r"[\s\u3000\-—_，,。．.!！?？:：;；()（）\"'「」『』]+", "", t)
+
+
 # ====== photo forwarding (with task matching) ======
 def forward_image_to_other_party(sender_user_id: str, sender_name: str, message_id: str) -> tuple[bool, str]:
     """
@@ -2776,6 +2879,8 @@ def handle_command(user_id: str, text: str) -> str:
 
     cmd, arg = _cmd(text)
     cmd_l = (cmd or "").strip().lower()
+    text_norm = _normalize_cmd_token(text)
+    cmd_norm = _normalize_cmd_token(cmd)
 
     if cmd in ("help", "說明", "幫助"):
         base_url = get_public_base_url()
@@ -2991,8 +3096,44 @@ def handle_command(user_id: str, text: str) -> str:
                     lines.append(f"{ds} ❌ 未回報")
         return "\n".join(lines)
 
+    # ===== quick aliases from rich menu / casual typing =====
+    if cmd == "吃了" or cmd_norm in ("吃了", "我吃了", "已吃"):
+        role = (get_user_role(db_path=LOVE_DB_PATH, user_id=user_id) or "").strip().lower()
+        if role != "girlfriend":
+            return "這個「吃了」快捷是給臭寶回報吃藥用的。若你是臭晡晡，可用「吃藥狀態」查看。"
+        # If girlfriend got here, fallback to explicit pill parsing once more.
+        if _is_pill_confirm_text(text):
+            now = _tz_now()
+            taken_dt, label = _extract_taken_dt_and_label(text, now)
+            day = now.date().isoformat()
+            set_med_pill_taken(
+                db_path=LOVE_DB_PATH,
+                user_id=user_id,
+                day=day,
+                taken_at_iso=taken_dt.isoformat(timespec="seconds"),
+                taken_time_text=label,
+                reported_text=text,
+            )
+            push_to_roles_text(("boyfriend",), f"{DEFAULT_GIRLFRIEND_NICKNAME} 今天已吃事前藥（{label}）。", reason="MED_CONFIRM_NOTIFY")
+            return f"收到～我記錄你今天 {label} 吃藥，並已通知 {DEFAULT_SELF_NICKNAME}。"
+
+    # ===== 小蛋 reminder quick ack =====
+    if cmd in ("小蛋回了", "小蛋已回", "回小蛋了") or cmd_norm in ("小蛋回了", "小蛋已回", "回小蛋了") or text_norm in ("小蛋回了", "小蛋已回", "回小蛋了"):
+        today = _tz_now().date().isoformat()
+        set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="xiaodan_done_day", value=today)
+        return "👌 收到～今天的小蛋提醒先暫停（明天 10:00 會再提醒）。"
+
+    if cmd in ("小蛋狀態", "小蛋提醒狀態") or cmd_norm in ("小蛋狀態", "小蛋提醒狀態", "小蛋status") or text_norm in ("小蛋狀態", "小蛋提醒狀態"):
+        today = _tz_now().date().isoformat()
+        done = (get_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="xiaodan_done_day") or "").strip()
+        return f"小蛋今日已回：{'是' if done == today else '否'}\n（回覆：小蛋回了）"
+
     # ===== Duolingo reminder commands =====
-    if cmd_l in ("duolingo已玩", "已玩duolingo", "duolingo完成", "多零果已玩", "已玩多零果", "多零果完成"):
+    if (
+        cmd_l in ("duolingo已玩", "已玩duolingo", "duolingo完成", "多零果已玩", "已玩多零果", "多零果完成")
+        or cmd_norm in ("duolingo已玩", "已玩duolingo", "duolingo完成", "多零果已玩", "已玩多零果", "多零果完成")
+        or text_norm in ("duolingo已玩", "已玩duolingo", "duolingo完成")
+    ):
         today = _tz_now().date().isoformat()
         set_setting(db_path=LOVE_DB_PATH, user_id=SETTINGS_GLOBAL_USER_ID, key="duo_done_day", value=today)
         return "👌 收到～今天就不再提醒 Duolingo 了（明天 22:00 會再開始）。"
@@ -3632,6 +3773,19 @@ def _scheduler_apply_settings(sched: BackgroundScheduler):
         print(f"[SCHED] Duo job applied: {sh:02d}:00-{eh:02d}:59 every {every}m", flush=True)
     except Exception as e:
         print("[SCHED][DUO] add_job error:", e, flush=True)
+
+    # ===== custom reminders scan (every minute; dashboard-configurable slots) =====
+    _scheduler_remove_if_exists(sched, "custom_reminders_scan")
+    try:
+        sched.add_job(
+            scheduled_custom_reminders_scan,
+            "interval",
+            minutes=1,
+            id="custom_reminders_scan",
+            replace_existing=True,
+        )
+    except Exception as e:
+        print("[SCHED][CUSTOM] add_job error:", e, flush=True)
 
     # ===== repair cooldown scan (every minute) =====
     _scheduler_remove_if_exists(sched, "repair_cooldown_scan")
@@ -6160,6 +6314,42 @@ DASH_SETTINGS_TEMPLATE = """<!doctype html>
       </div>
 
       <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
+        <div class="text-lg font-semibold">自訂提醒（每天）</div>
+        <div class="mt-1 text-sm text-slate-600">
+          可自行新增提醒內容與時間。時間格式用 CSV（例如 <span class="font-mono">10:00,11:00,12:00</span>）。
+          預設第 1 格是小蛋提醒；回覆 <span class="font-mono">小蛋回了</span> 後，今天小蛋提醒會暫停。
+          小蛋今日狀態：<span class="font-mono">{{ "已回" if xiaodan_done_today else "未回" }}</span>
+        </div>
+        <div class="mt-4 space-y-4">
+          {% for r in custom_reminder_rows %}
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <label class="flex items-center gap-2">
+                <input type="checkbox" name="{{ 'custom_reminder_' ~ r.idx ~ '_enabled' }}" value="1" {% if r.enabled %}checked{% endif %} />
+                <span>啟用提醒 #{{ r.idx }}</span>
+              </label>
+
+              <label class="block">
+                <div class="text-sm text-slate-600">提醒名稱（顯示用）</div>
+                <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="{{ 'custom_reminder_' ~ r.idx ~ '_name' }}" value="{{ r.name }}" placeholder="例如：小蛋" />
+              </label>
+
+              <label class="block">
+                <div class="text-sm text-slate-600">每天時間（CSV）</div>
+                <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 font-mono" name="{{ 'custom_reminder_' ~ r.idx ~ '_times' }}" value="{{ r.times }}" placeholder="08:00,12:00,20:00" />
+              </label>
+
+              <label class="block">
+                <div class="text-sm text-slate-600">提醒文字（推播內容）</div>
+                <input class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" name="{{ 'custom_reminder_' ~ r.idx ~ '_message' }}" value="{{ r.message }}" placeholder="要推播到 LINE 的文字" />
+              </label>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="rounded-2xl bg-white shadow-sm border border-slate-200 p-5">
         <div class="text-lg font-semibold">情人節驚喜排程</div>
         <div class="mt-1 text-sm text-slate-600">2/14 從早上 08:00 開始，每小時發一則。可自訂對象與訊息內容。</div>
         <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -8026,6 +8216,12 @@ def dash_settings():
             # allow empty to disable quiet hours
             _set("med_pill_quiet_hours", (request.form.get("med_pill_quiet_hours") or ""))
 
+            # custom reminders (fixed slots; can leave empty rows unused)
+            for i in range(1, CUSTOM_REMINDER_SLOT_COUNT + 1):
+                _set(_custom_reminder_key(i, "enabled"), "1" if request.form.get(_custom_reminder_key(i, "enabled")) else "0")
+                for field in ("name", "times", "message"):
+                    _set(_custom_reminder_key(i, field), (request.form.get(_custom_reminder_key(i, field)) or "").strip())
+
             # role labels (dashboard only)
             _set("role_label_girlfriend", (request.form.get("role_label_girlfriend") or "").strip())
             _set("role_label_boyfriend", (request.form.get("role_label_boyfriend") or "").strip())
@@ -8134,6 +8330,8 @@ def dash_settings():
         "med_pill_nudge_minutes": med_pill_nudge_minutes(),
         "med_pill_max_remind_count": med_pill_max_remind_count(),
         "med_pill_quiet_hours": (lambda v: MED_PILL_QUIET_HOURS if v is None else str(v))(_get_setting_global("med_pill_quiet_hours")),
+        "custom_reminder_rows": custom_reminder_rows_for_view(),
+        "xiaodan_done_today": xiaodan_done_today(_tz_now()),
 
         "role_label_girlfriend": gf_label,
         "role_label_boyfriend": bf_label,
