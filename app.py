@@ -39,6 +39,8 @@ from db_love import (
     # wishes/moods/settings
     add_wish,
     list_wishes,
+    delete_wish,
+    get_wish,
     add_mood,
     list_moods,
     set_setting,
@@ -2396,8 +2398,9 @@ def help_text() -> str:
         "━━━━━━━━━━━━━━━━\n"
         "八、生活記錄\n"
         "━━━━━━━━━━━━━━━━\n"
-        "  許願 <內容> / 願望\n"
-        "    - 記錄願望清單\n"
+        "  許願 <內容>（可選：| 圖片URL | 連結URL） / 願望\n"
+        "  刪願望 <id>\n"
+        "    - 記錄禮物願望清單（儀表板 /dash/wishlist 可上傳圖片）\n"
         "\n"
         "  心情 <內容>\n"
         "  回顧心情\n"
@@ -3205,16 +3208,59 @@ def handle_command(user_id: str, text: str) -> str:
     # wishes/moods
     if cmd == "許願":
         if not arg:
-            return "用法：許願 <內容>"
-        wid = add_wish(db_path=LOVE_DB_PATH, user_id=user_id, text=arg)
+            return "用法：許願 <內容>（可選：| 圖片URL | 連結URL）"
+
+        # 支援：許願 滑鼠 | https://...jpg | https://shop...
+        raw = arg.strip()
+        parts = [p.strip() for p in raw.split("|")]
+        title = (parts[0] if parts else "").strip()
+        image_url = ""
+        link_url = ""
+        for p in parts[1:]:
+            if not p:
+                continue
+            lower = p.lower()
+            if not image_url and lower.startswith(("http://", "https://")) and any(
+                lower.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif")
+            ):
+                image_url = p
+            elif not link_url and lower.startswith(("http://", "https://")):
+                link_url = p
+            elif not link_url:
+                link_url = p
+
+        if not title:
+            return "用法：許願 <內容>（可選：| 圖片URL | 連結URL）"
+
+        wid = add_wish(db_path=LOVE_DB_PATH, user_id=user_id, text=title, image_url=image_url or None, link_url=link_url or None)
         return f"✅ 願望已記下來了（#{wid}）"
 
     if cmd == "願望":
         ws = list_wishes(db_path=LOVE_DB_PATH, user_id=user_id, limit=10)
         if not ws:
             return "你目前沒有願望清單。用：許願 <內容> 來新增"
-        lines = [f"#{w['id']} {w['text']} ({w['created_at']})" for w in ws]
+        lines = []
+        for w in ws:
+            img = (w.get("image_filename") or w.get("image_url") or "").strip()
+            url = (w.get("link_url") or "").strip()
+            extra = []
+            if img:
+                extra.append("🖼")
+            if url:
+                extra.append(url)
+            suffix = f" {' '.join(extra)}" if extra else ""
+            lines.append(f"#{w['id']} {w['text']}{suffix} ({w['created_at']})")
         return "📝 願望清單（最近 10 筆）\n" + "\n".join(lines)
+
+    if cmd in ("刪願望", "刪除願望"):
+        if not arg:
+            return "用法：刪願望 <id>"
+        try:
+            wid = int((arg or "").strip())
+        except Exception:
+            return "id 格式不對。用法：刪願望 <id>"
+        ok = delete_wish(db_path=LOVE_DB_PATH, user_id=user_id, wish_id=wid)
+        return f"✅ 已刪除願望 #{wid}" if ok else "找不到這筆願望（或你沒有權限刪除）。"
 
     if cmd == "心情":
         if not arg:
@@ -4770,6 +4816,48 @@ def _photo_mission_save_upload(file_storage) -> tuple[str, str] | None:
     return message_id, filename
 
 
+def _wishlist_dir() -> Path:
+    d = MEDIA_DIR / "wishlist"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _wishlist_save_upload(file_storage) -> str | None:
+    """
+    Save an uploaded image for wishlist use.
+    - Stores under MEDIA_DIR/wishlist (Zeabur persistent volume recommended).
+    - Converts to JPEG and downscales to keep payload reasonable.
+    Returns saved filename, or None if invalid image.
+    """
+    ctype = (file_storage.mimetype or "").split(";")[0].strip().lower()
+    if not ctype.startswith("image/"):
+        return None
+
+    try:
+        img = Image.open(file_storage.stream)
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        max_w = 1400
+        if getattr(img, "width", 0) and img.width > max_w:
+            h = max(1, int(img.height * (max_w / float(img.width))))
+            img = img.resize((max_w, h), Image.LANCZOS)
+
+        filename = f"wish_{int(time.time() * 1000)}_{os.urandom(4).hex()}.jpg"
+        out_dir = _wishlist_dir()
+        out_path = out_dir / filename
+        tmp = out_path.with_suffix(".tmp")
+        img.save(tmp, format="JPEG", quality=82, optimize=True)
+        os.replace(tmp, out_path)
+        return filename
+    except Exception:
+        return None
+
+
 def _photo_mission_create_submission(
     mission: dict,
     submitter_uid: str,
@@ -5339,7 +5427,7 @@ DASH_TEMPLATE = """<!doctype html>
     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
       <div>
         <h1 class="text-2xl md:text-3xl font-bold">{{ bot_name }}｜私人儀表板</h1>
-        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a>　·　<a class="underline" href="/dash/settings">設定中心</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a>　·　<a class="underline" href="/dash/repair">修復中心</a>　·　<a class="underline" href="/dash/game">紓壓遊戲</a></div>
+        <div class="mt-1 text-sm text-slate-600">更新時間：{{ updated_at }}　·　<a class="underline" href="{{ base_url }}/docs">使用說明</a>　·　<a class="underline" href="/dash/settings">設定中心</a>　·　<a class="underline" href="/dash/wishlist">禮物清單</a>　·　<a class="underline" href="/dash/tasks">任務牆</a>　·　<a class="underline" href="/dash/gallery">相簿</a>　·　<a class="underline" href="/dash/repair">修復中心</a>　·　<a class="underline" href="/dash/game">紓壓遊戲</a></div>
       </div>
       <div class="text-sm text-slate-600">
         <div>{{ gf_label }}：{{ gf_name or "未設定" }}　·　{{ bf_label }}：{{ bf_name or "未設定" }}</div>
@@ -5454,6 +5542,7 @@ DASH_TEMPLATE = """<!doctype html>
 
     <div class="mt-4 rounded-2xl bg-white shadow p-6">
       <div class="text-lg font-semibold">✨ 願望清單（最近 {{ wishes_limit }} 筆）</div>
+      <div class="mt-1 text-sm text-slate-600"><a class="underline" href="/dash/wishlist">前往禮物清單（可加圖片/連結）</a></div>
       {% if wishes %}
         <div class="mt-3 overflow-x-auto">
           <table class="min-w-full text-sm">
@@ -5485,6 +5574,205 @@ DASH_TEMPLATE = """<!doctype html>
     <div class="mt-6 text-xs text-slate-500">
       <div>🔒 這是私人頁面：需要從 LINE 取得一次性登入連結。</div>
       <div class="mt-1">若你登入失效，回到 LINE 輸入「儀表板」即可重新取得登入連結。</div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+DASH_WISHLIST_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ bot_name }}｜禮物清單</title>
+  <style>
+    :root{
+      --slate-50:#f8fafc; --slate-100:#f1f5f9; --slate-200:#e2e8f0; --slate-300:#cbd5e1;
+      --slate-500:#64748b; --slate-600:#475569; --slate-700:#334155; --slate-900:#0f172a;
+      --emerald-50:#ecfdf5; --emerald-200:#a7f3d0; --emerald-900:#064e3b;
+      --rose-50:#fff1f2; --rose-200:#fecdd3; --rose-900:#881337;
+      --shadow: 0 10px 30px rgba(15, 23, 42, .08);
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      background:var(--slate-50);
+      color:var(--slate-900);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", "Helvetica Neue", Arial;
+    }
+    a{color:inherit}
+    .wrap{max-width:1100px; margin:0 auto; padding:18px 16px 44px;}
+    .top{display:flex; justify-content:space-between; gap:12px; align-items:flex-end; flex-wrap:wrap;}
+    .h1{font-size:28px; font-weight:900; letter-spacing:.2px;}
+    .sub{color:var(--slate-600); font-size:13px; line-height:1.5;}
+    .sub a{ text-decoration:underline; }
+    .grid{display:grid; gap:14px; margin-top:16px;}
+    @media (min-width: 900px){ .grid{grid-template-columns:1fr 1fr;} }
+    .card{background:#fff; border:1px solid var(--slate-200); border-radius:18px; padding:16px; box-shadow:var(--shadow);}
+    .cardh{display:flex; justify-content:space-between; gap:12px; align-items:center;}
+    .cardh .t{font-weight:900;}
+    .hint{font-size:12px; color:var(--slate-500);}
+    .ok{margin-top:14px; border:1px solid var(--emerald-200); background:var(--emerald-50); color:var(--emerald-900); padding:10px 12px; border-radius:12px;}
+    .warn{margin-top:14px; border:1px solid var(--rose-200); background:var(--rose-50); color:var(--rose-900); padding:10px 12px; border-radius:12px;}
+    .form{margin-top:12px; display:grid; gap:10px;}
+    .row{display:grid; gap:10px;}
+    @media (min-width: 520px){ .row{grid-template-columns: 1fr 1fr;} }
+    label{display:block; font-size:12px; color:var(--slate-600);}
+    input{
+      width:100%;
+      margin-top:6px;
+      padding:10px 12px;
+      border:1px solid var(--slate-300);
+      border-radius:12px;
+      font-size:14px;
+      outline:none;
+      background:#fff;
+    }
+    input:focus{border-color:#94a3b8; box-shadow:0 0 0 4px rgba(148,163,184,.25);}
+    .btn{
+      display:inline-flex; align-items:center; justify-content:center;
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid var(--slate-300);
+      background:var(--slate-100);
+      font-weight:800;
+      cursor:pointer;
+    }
+    .btn.primary{background:#0f172a; border-color:#0f172a; color:#fff;}
+    .btn.danger{background:var(--rose-50); border-color:var(--rose-200); color:var(--rose-900);}
+    .list{margin-top:14px; display:grid; gap:10px;}
+    .item{display:flex; gap:10px; align-items:flex-start; border:1px solid var(--slate-200); border-radius:16px; padding:10px; background:linear-gradient(180deg,#fff 0%, #fbfdff 100%);}
+    .thumb{width:66px; height:66px; border-radius:14px; object-fit:cover; border:1px solid var(--slate-200); background:var(--slate-100); flex:0 0 auto;}
+    .meta{min-width:0; flex:1 1 auto;}
+    .title{font-weight:900; word-break:break-word;}
+    .small{margin-top:4px; font-size:12px; color:var(--slate-600); word-break:break-all;}
+    .actions{flex:0 0 auto;}
+    .empty{margin-top:10px; color:var(--slate-600); font-size:13px;}
+    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <div class="h1">🎁 禮物清單</div>
+        <div class="sub">
+          更新時間：{{ updated_at }}
+          · <a href="/dash">回儀表板</a>
+          · <a href="/dash/settings">設定中心</a>
+          · <a href="/dash/wishlist">禮物清單</a>
+          · <a href="/dash/tasks">任務牆</a>
+          · <a href="/dash/gallery">相簿</a>
+          · <a href="/dash/repair">修復中心</a>
+          · <a href="/dash/game">紓壓遊戲</a>
+        </div>
+        <div class="sub hint" style="margin-top:6px;">也可以在 LINE 打：<span class="mono">許願 &lt;內容&gt;</span> / <span class="mono">願望</span></div>
+      </div>
+      <div class="sub">{{ me_name }}（你） · {{ other_name }}（對方）</div>
+    </div>
+
+    {% if status %}
+      <div class="ok">{{ status }}</div>
+    {% endif %}
+    {% if error %}
+      <div class="warn">{{ error }}</div>
+    {% endif %}
+
+    <div class="grid">
+      <div class="card">
+        <div class="cardh">
+          <div class="t">你的願望清單</div>
+          <div class="hint">新增後對方也看得到</div>
+        </div>
+
+        <form class="form" method="post" enctype="multipart/form-data">
+          <input type="hidden" name="action" value="add" />
+          <label>
+            禮物名稱
+            <input name="text" placeholder="例如：滑鼠 / 鍵盤 / 耳機" maxlength="200" required />
+          </label>
+          <div class="row">
+            <label>
+              上傳圖片（可空白）
+              <input name="image_file" type="file" accept="image/*" />
+            </label>
+            <label>
+              連結 URL（可空白）
+              <input name="link_url" placeholder="https://..." maxlength="800" />
+            </label>
+          </div>
+          <button class="btn primary" type="submit">新增</button>
+        </form>
+
+        {% if my_wishes %}
+          <div class="list">
+            {% for w in my_wishes %}
+              <div class="item">
+                {% if w.image_filename %}
+                  <img class="thumb" loading="lazy" src="/dash/wishlist/image/{{ w.id }}" alt="wish image" />
+                {% elif w.image_url %}
+                  <img class="thumb" loading="lazy" referrerpolicy="no-referrer" src="{{ w.image_url }}" alt="wish image" />
+                {% else %}
+                  <div class="thumb" aria-hidden="true"></div>
+                {% endif %}
+                <div class="meta">
+                  <div class="title">#{{ w.id }} {{ w.text }}</div>
+                  <div class="small">
+                    {{ w.created_at }}
+                    {% if w.link_url %}
+                      · <a href="{{ w.link_url }}" target="_blank" rel="noopener noreferrer">連結</a>
+                    {% endif %}
+                  </div>
+                </div>
+                <div class="actions">
+                  <form method="post">
+                    <input type="hidden" name="action" value="delete" />
+                    <input type="hidden" name="wish_id" value="{{ w.id }}" />
+                    <button class="btn danger" type="submit">刪除</button>
+                  </form>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="empty">你目前還沒有願望。先新增幾個，對方之後就能直接來看。</div>
+        {% endif %}
+      </div>
+
+      <div class="card">
+        <div class="cardh">
+          <div class="t">對方的願望清單</div>
+          <div class="hint">只能查看，不能替對方刪除</div>
+        </div>
+
+        {% if other_wishes %}
+          <div class="list">
+            {% for w in other_wishes %}
+              <div class="item">
+                {% if w.image_filename %}
+                  <img class="thumb" loading="lazy" src="/dash/wishlist/image/{{ w.id }}" alt="wish image" />
+                {% elif w.image_url %}
+                  <img class="thumb" loading="lazy" referrerpolicy="no-referrer" src="{{ w.image_url }}" alt="wish image" />
+                {% else %}
+                  <div class="thumb" aria-hidden="true"></div>
+                {% endif %}
+                <div class="meta">
+                  <div class="title">#{{ w.id }} {{ w.text }}</div>
+                  <div class="small">
+                    {{ w.created_at }}
+                    {% if w.link_url %}
+                      · <a href="{{ w.link_url }}" target="_blank" rel="noopener noreferrer">連結</a>
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="empty">對方目前還沒有新增願望。</div>
+        {% endif %}
+      </div>
     </div>
   </div>
 </body>
@@ -5655,6 +5943,7 @@ DASH_TASKS_TEMPLATE = """<!doctype html>
           更新時間：{{ updated_at }}
           · <a class="underline" href="/dash">回儀表板</a>
           · <a class="underline" href="/dash/settings">設定中心</a>
+          · <a class="underline" href="/dash/wishlist">禮物清單</a>
           · <a class="underline" href="/dash/gallery">相簿</a>
           · <a class="underline" href="/dash/repair">修復中心</a>
           · <a class="underline" href="/dash/game">紓壓遊戲</a>
@@ -5925,6 +6214,7 @@ DASH_GALLERY_TEMPLATE = """<!doctype html>
           更新時間：{{ updated_at }}
           · <a class="underline" href="/dash">回儀表板</a>
           · <a class="underline" href="/dash/settings">設定中心</a>
+          · <a class="underline" href="/dash/wishlist">禮物清單</a>
           · <a class="underline" href="/dash/tasks">任務牆</a>
           · <a class="underline" href="/dash/repair">修復中心</a>
           · <a class="underline" href="/dash/game">紓壓遊戲</a>
@@ -6583,7 +6873,7 @@ DASH_REPAIR_TEMPLATE = """<!doctype html>
     <div class="row" style="justify-content:space-between;">
       <div>
         <div style="font-size:28px; font-weight:800;">修復中心</div>
-        <div class="muted">更新時間：{{ updated_at }}　·　<a href="/dash">回儀表板</a>　·　<a href="/dash/settings">設定中心</a>　·　<a href="/dash/tasks">任務牆</a>　·　<a href="/dash/gallery">相簿</a>　·　<a href="/dash/game">紓壓遊戲</a></div>
+        <div class="muted">更新時間：{{ updated_at }}　·　<a href="/dash">回儀表板</a>　·　<a href="/dash/settings">設定中心</a>　·　<a href="/dash/wishlist">禮物清單</a>　·　<a href="/dash/tasks">任務牆</a>　·　<a href="/dash/gallery">相簿</a>　·　<a href="/dash/game">紓壓遊戲</a></div>
       </div>
       <div class="muted">{{ me_name }}（你） · {{ other_name }}（對方）</div>
     </div>
@@ -8362,6 +8652,134 @@ def dash():
         return resp
     data = _build_dashboard_data()
     return render_template_string(DASH_TEMPLATE, **data)
+
+@app.route("/dash/wishlist", methods=["GET", "POST"])
+def dash_wishlist():
+    resp = _dash_require_page()
+    if resp is not None:
+        return resp
+
+    base = _build_dash_base()
+    uid = _dash_current_uid()
+    me_id, me_name, other_id, other_name = _dash_pair_for_uid(base, uid)
+    status = ""
+    error = ""
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        try:
+            if not me_id:
+                raise ValueError("找不到目前登入身份")
+
+            if action == "add":
+                text = (request.form.get("text") or "").strip()
+                link_url = (request.form.get("link_url") or "").strip()
+                image_url = (request.form.get("image_url") or "").strip()
+                image_filename = None
+
+                f = request.files.get("image_file")
+                if f and (getattr(f, "filename", "") or "").strip():
+                    image_filename = _wishlist_save_upload(f)
+                    if not image_filename:
+                        raise ValueError("檔案格式不支援，請上傳圖片檔（jpg/png/webp）。")
+                    # Prefer uploaded file over URL.
+                    image_url = ""
+
+                if not text:
+                    raise ValueError("請輸入禮物名稱")
+                wid = add_wish(
+                    db_path=LOVE_DB_PATH,
+                    user_id=me_id,
+                    text=text,
+                    image_filename=image_filename,
+                    image_url=image_url or None,
+                    link_url=link_url or None,
+                )
+                status = f"✅ 已新增願望（#{wid}）"
+            elif action == "delete":
+                try:
+                    wish_id = int(request.form.get("wish_id") or 0)
+                except Exception:
+                    wish_id = 0
+                if wish_id <= 0:
+                    raise ValueError("wish_id 無效")
+                w = get_wish(db_path=LOVE_DB_PATH, wish_id=wish_id) or {}
+                owner = (w.get("user_id") or "").strip()
+                if not owner:
+                    status = "找不到這筆願望。"
+                elif owner != me_id:
+                    status = "這筆願望不是你新增的，不能刪除。"
+                else:
+                    ok = delete_wish(db_path=LOVE_DB_PATH, user_id=me_id, wish_id=wish_id)
+                    if ok:
+                        fn = (w.get("image_filename") or "").strip()
+                        if fn and ("/" not in fn) and ("\\" not in fn) and (".." not in fn):
+                            try:
+                                path = (MEDIA_DIR / "wishlist" / fn)
+                                if path.exists():
+                                    path.unlink()
+                            except Exception:
+                                pass
+                        status = f"✅ 已刪除願望（#{wish_id}）"
+                    else:
+                        status = "找不到這筆願望（或刪除失敗，請再試一次）。"
+            else:
+                raise ValueError("未知操作")
+        except Exception as e:
+            error = str(e)
+
+    # list
+    my_wishes = list_wishes(db_path=LOVE_DB_PATH, user_id=me_id, limit=120) if me_id else []
+    other_wishes = list_wishes(db_path=LOVE_DB_PATH, user_id=other_id, limit=120) if other_id else []
+
+    data = {
+        "bot_name": base["bot_name"],
+        "base_url": base["base_url"],
+        "updated_at": base["updated_at"],
+        "me_name": me_name,
+        "other_name": other_name,
+        "status": status,
+        "error": error,
+        "my_wishes": my_wishes,
+        "other_wishes": other_wishes,
+    }
+    return render_template_string(DASH_WISHLIST_TEMPLATE, **data)
+
+
+@app.route("/dash/wishlist/image/<int:wish_id>")
+def dash_wishlist_image(wish_id: int):
+    resp = _dash_require_page()
+    if resp is not None:
+        return resp
+
+    base = _build_dash_base()
+    uid = _dash_current_uid()
+    me_id, _, other_id, _ = _dash_pair_for_uid(base, uid)
+
+    w = get_wish(db_path=LOVE_DB_PATH, wish_id=int(wish_id))
+    if not w:
+        abort(404)
+
+    owner = (w.get("user_id") or "").strip()
+    allowed = {x for x in [me_id, other_id] if (x or "").strip()}
+    if owner not in allowed:
+        abort(404)
+
+    fn = (w.get("image_filename") or "").strip()
+    if not fn:
+        abort(404)
+    if ("/" in fn) or ("\\" in fn) or (".." in fn):
+        abort(400)
+
+    path = (MEDIA_DIR / "wishlist" / fn)
+    if not path.exists():
+        abort(404)
+
+    resp = send_file(path, mimetype="image/jpeg", as_attachment=False, conditional=True, max_age=31536000)
+    resp.cache_control.private = True
+    resp.cache_control.max_age = 31536000
+    resp.cache_control.immutable = True
+    return resp
 
 
 @app.route("/dash/repair", methods=["GET", "POST"])

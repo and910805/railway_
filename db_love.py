@@ -123,11 +123,25 @@ def seed_defaults(db_path: str = DEFAULT_DB):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
             text TEXT NOT NULL,
+            image_filename TEXT,
+            image_url TEXT,
+            link_url TEXT,
             created_at TEXT NOT NULL
         )
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_wishes_user_created ON wishes(user_id, created_at DESC);")
+    # Backfill columns for older DBs (schema-compat).
+    try:
+        cols = _table_cols(conn, "wishes")
+        if "image_filename" not in cols:
+            cur.execute("ALTER TABLE wishes ADD COLUMN image_filename TEXT")
+        if "image_url" not in cols:
+            cur.execute("ALTER TABLE wishes ADD COLUMN image_url TEXT")
+        if "link_url" not in cols:
+            cur.execute("ALTER TABLE wishes ADD COLUMN link_url TEXT")
+    except Exception:
+        pass
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS moods (
@@ -810,9 +824,31 @@ def add_date_idea(db_path: str, text: str) -> int:
 
 
 # ===== wishes / moods =====
-def add_wish(db_path: str, user_id: str, text: str) -> int:
+def add_wish(
+    db_path: str,
+    user_id: str,
+    text: str,
+    image_filename: str | None = None,
+    image_url: str | None = None,
+    link_url: str | None = None,
+) -> int:
     conn = _conn(db_path)
-    cur = _execute(conn, "INSERT INTO wishes(user_id, text, created_at) VALUES(?, ?, ?)", (user_id, text, _tz_now_iso()))
+    cols = _table_cols(conn, "wishes")
+    if "image_filename" in cols or "image_url" in cols or "link_url" in cols:
+        cur = _execute(
+            conn,
+            "INSERT INTO wishes(user_id, text, image_filename, image_url, link_url, created_at) VALUES(?, ?, ?, ?, ?, ?)",
+            (
+                user_id,
+                text,
+                (image_filename or "").strip() or None,
+                (image_url or "").strip() or None,
+                (link_url or "").strip() or None,
+                _tz_now_iso(),
+            ),
+        )
+    else:
+        cur = _execute(conn, "INSERT INTO wishes(user_id, text, created_at) VALUES(?, ?, ?)", (user_id, text, _tz_now_iso()))
     conn.commit()
     rid = cur.lastrowid
     conn.close()
@@ -821,12 +857,44 @@ def add_wish(db_path: str, user_id: str, text: str) -> int:
 
 def list_wishes(db_path: str, user_id: str, limit: int = 10) -> list[dict]:
     conn = _conn(db_path)
+    cols = _table_cols(conn, "wishes")
+    select_cols = ["id", "text", "created_at"]
+    if "image_filename" in cols:
+        select_cols.append("image_filename")
+    if "image_url" in cols:
+        select_cols.append("image_url")
+    if "link_url" in cols:
+        select_cols.append("link_url")
     rows = conn.execute(
-        "SELECT id, text, created_at FROM wishes WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        f"SELECT {', '.join(select_cols)} FROM wishes WHERE user_id=? ORDER BY id DESC LIMIT ?",
         (user_id, limit),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_wish(db_path: str, wish_id: int) -> Optional[dict]:
+    conn = _conn(db_path)
+    cols = _table_cols(conn, "wishes")
+    select_cols = ["id", "user_id", "text", "created_at"]
+    if "image_filename" in cols:
+        select_cols.append("image_filename")
+    if "image_url" in cols:
+        select_cols.append("image_url")
+    if "link_url" in cols:
+        select_cols.append("link_url")
+    row = conn.execute(f"SELECT {', '.join(select_cols)} FROM wishes WHERE id=?", (int(wish_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def delete_wish(db_path: str, user_id: str, wish_id: int) -> bool:
+    conn = _conn(db_path)
+    cur = _execute(conn, "DELETE FROM wishes WHERE id=? AND user_id=?", (int(wish_id), user_id))
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
 
 
 def add_mood(db_path: str, user_id: str, text: str) -> int:
